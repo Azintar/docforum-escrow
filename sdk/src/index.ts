@@ -33,6 +33,17 @@ export interface Escrow {
    * relying on a `Funded` escrow (threat model T8).
    */
   refundAfter?: bigint;
+  /**
+   * The optional protocol fee as declared at creation, fixed and
+   * inspectable on-chain (docs/adr/0005): `feeBps` basis points of
+   * `amount` go to `feeRecipient` at release, never on refund.
+   * `undefined` means no fee: the payee receives the full `amount`.
+   * Payers and payees alike should read this before relying on the
+   * escrow.
+   */
+  feeRecipient?: string;
+  /** Basis points of `amount` (1 000 = 10 %, contract-capped). */
+  feeBps?: number;
   status: EscrowStatus;
 }
 
@@ -69,6 +80,17 @@ export interface CreateEscrowParams {
    * releaser-only, exactly as in 0.2.x.
    */
   refundAfter?: bigint;
+  /**
+   * Optional protocol fee (docs/adr/0005): at release, `feeBps` basis
+   * points of `amount` (rounded down, floored remainder to the payee,
+   * capped at 1 000 bps = 10 %) go to `feeRecipient` once — never on
+   * refund. Both fields must be given together or both omitted (
+   * `InvalidFee`, error 7); `feeRecipient` must not be the escrow
+   * contract itself. Omit both for a fee-free escrow, behaving exactly
+   * as in 0.3.x.
+   */
+  feeRecipient?: string;
+  feeBps?: number;
 }
 
 export interface ReleaseOrRefundParams {
@@ -113,6 +135,8 @@ export class EscrowClient {
       condition_ref: params.conditionRef,
       releaser: params.releaser,
       refund_after: params.refundAfter,
+      fee_recipient: params.feeRecipient,
+      fee_bps: params.feeBps,
     });
     const sent = await tx.signAndSend();
     return { escrowId: sent.result.unwrap(), txHash: sent.sendTransactionResponse!.hash };
@@ -129,8 +153,9 @@ export class EscrowClient {
   /**
    * Read-only: everything stored about `escrowId` — including
    * `releaser` and `refundAfter`, which payees should check before
-   * relying on a `Funded` escrow (docs/adr/0004, threat model T8).
-   * Throws if `escrowId` doesn't exist.
+   * relying on a `Funded` escrow (docs/adr/0004, threat model T8), and
+   * the optional protocol fee both parties can read before funding
+   * (docs/adr/0005). Throws if `escrowId` doesn't exist.
    */
   async getEscrow(escrowId: bigint): Promise<Escrow> {
     const client = this.contractClient();
@@ -147,6 +172,11 @@ export class EscrowClient {
       // public surface uses `undefined` for "no deadline" (consistent
       // with `CreateEscrowParams.refundAfter` being absent).
       refundAfter: data.refund_after ?? undefined,
+      // The generated client decodes a contract `None` as `null`; the
+      // public surface uses `undefined` for "no fee" (consistent with
+      // `CreateEscrowParams.feeRecipient`/`feeBps` being absent).
+      feeRecipient: data.fee_recipient ?? undefined,
+      feeBps: data.fee_bps ?? undefined,
       status: data.status.tag,
     };
   }

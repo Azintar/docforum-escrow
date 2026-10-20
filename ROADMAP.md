@@ -3,7 +3,7 @@
 > Update this file on every contribution that starts/completes/blocks an
 > item below.
 
-**Status: Phase E1 done. Phase E2 done and live on testnet. Phase E3's `create_escrow`/`get_status`/`release`/`refund` wrapping done; SDK distribution decided (issue #5 closed — GitHub Release tarball, ADR 0003). Phase E4 (security review, issue #6) in progress: threat model drafted (`docs/threat-model.md`) and the timeout-refund item closed (issue #11 — ADR 0004 + implementation, live on testnet); independent review not yet done — blocking for any mainnet use.**
+**Status: Phase E1 done. Phase E2 done and live on testnet. Phase E3's `create_escrow`/`get_status`/`release`/`refund` wrapping done; SDK distribution decided (issue #5 closed — GitHub Release tarball, ADR 0003). Phase E4 (security review, issue #6) in progress: threat model drafted (`docs/threat-model.md`) and the timeout-refund item closed (issue #11 — ADR 0004 + implementation, live on testnet); independent review not yet done — blocking for any mainnet use. Phase E5 started: the optional protocol fee taken at release is implemented and tested in source (issue #30 — ADR 0005, 46 tests passing, SDK 0.4.0), not yet redeployed to testnet.**
 
 ## Phase E1 — Contract skeleton
 - [x] Soroban project scaffold (`contracts/escrow`), builds to wasm
@@ -121,6 +121,39 @@
 - [ ] Related, not in the checklist: [#13](https://github.com/DocForum/docforum-escrow/issues/13) `get_escrow`
   full-record read (Medium), [#14](https://github.com/DocForum/docforum-escrow/issues/14) offline SDK unit tests in CI
   (Medium).
+
+## Phase E5 — Contract features
+- [x] Optional protocol fee taken at release, with recipient and bps fixed
+  at creation — issue #30. Decided in `docs/adr/0005`: an optional
+  `fee_recipient`/`fee_bps` pair (the pair is atomic — a half-set fee is
+  rejected with the new `Error::InvalidFee = 7`) capped at 10 %
+  (`MAX_FEE_BPS = 1_000` basis points), taken **off the top** at release
+  — `⌊amount × fee_bps ÷ 10 000⌋` to `fee_recipient`, the exact remainder
+  to `payee` (rounding floors, so fee + payout always sum to exactly the
+  stored `amount`) — and **never** on `refund`, which still returns the
+  full `amount` to the payer. `fee_recipient` must not be the escrow
+  contract itself. Both pieces are readable from `get_escrow` before the
+  funds are locked, which is the issue's motivating property: payer and
+  payee can check the exact deal. A revision note in ADR 0005 records
+  that the originally planned single `Option<Fee>` struct param is not
+  representable in soroban-sdk 27's XDR conversions (custom structs
+  inside `Option` fail to compile under the testutils feature — the
+  generated `From<&Option<T>>` blanket needs an infallible `Into<ScVal>`
+  the contracttype macro doesn't emit), so the pair is spelled as two
+  parallel `Option` params with the atomicity enforced at creation.
+  15 new tests in `contracts/escrow/tests/protocol_fee.rs` plus updated
+  fixtures in the four existing test files — 46/46 passing repo-wide,
+  wasm release build verified. Breaking `create_escrow` change → SDK
+  bindings regenerated from the new wasm (never hand-edited),
+  `@docforum/escrow-sdk` **0.3.0 → 0.4.0** (`createEscrow` gains optional
+  `feeRecipient`/`feeBps`; `getEscrow()` exposes them), typecheck + build
+  verified. **Not yet done:** redeploying to testnet with the fee
+  signature and verifying the fee cut live (`docs/testnet-deployments.md`)
+  — until then `npm run test:integration` cannot pass against the current
+  E4 deployment (its old `create_escrow` has no fee params), and the SDK
+  integration tests are expected to run only after that redeploy; the
+  `sdk-v0.4.0` release tarball per ADR 0003 is likewise a follow-up
+  before `docforum-core` can consume it. Closes issue #30.
 
 ## Explicitly out of scope for this repo
 - Any healthcare-specific logic (see README).
@@ -305,3 +338,44 @@
   #12 were opened and closed in between). #16 merged with an empty diff
   because its branch's merge from `main` kept `main`'s ROADMAP.md
   wholesale.
+- 2026-10-20 — Closed issue #30 (Phase E5: optional protocol fee taken
+  at release). **ADR first:** `docs/adr/0005` fixes the whole shape —
+  recipient + `bps` as one creation-time pair so `get_escrow` reveals
+  the exact deal before funding (the issue's motivating property, and
+  the reason it can never be set or changed later); `bps` capped at
+  1 000 of 10 000 (10 %); fee math floors so fee + payee payout always
+  sum to exactly the stored `amount` (new invariant I6, the reviewer's
+  check); fee taken once off the top, not per payee, so a future split
+  payout would divide the `net`; refunds return the full `amount` with
+  no fee ever; `fee_recipient` must not be the contract itself (the one
+  unambiguously broken configuration — funds paid there are unrecoverable
+  by every path this contract offers); tiny amounts may round the fee to
+  zero, accepted. A revision note records that the planned single
+  `Option<Fee>` struct param doesn't compile under soroban-sdk 27's
+  testutils conversions (custom structs inside `Option` — the newly
+  typed XDR blanket `From<&Option<T>> for ScVal` needs an infallible
+  `Into<ScVal>` structs get only a fallible `TryFrom`), so the pair is
+  two parallel `Option` params with creation-time atomicity.
+  **Implementation:** `fee_recipient`/`fee_bps` params validated at
+  `create_escrow` (both-or-neither, cap, self-recipient, and a checked
+  fee multiplication so overflow fails creation before any funds move —
+  new `Error::InvalidFee = 7`, the next unused code; 5 and 6 are live on
+  testnet from #18's incident); release splits fee then remainder;
+  `refund` untouched; `get_escrow` exposes both fields.
+  **Tests:** 15 new in `tests/protocol_fee.rs` (split + sum invariant,
+  floor rounding both in the middle and all the way to zero, cap
+  boundary both sides, half-pair rejection, self-recipient rejection,
+  overflow rejected before locking, fee-on-refund absence for both
+  refund callers, read-back, exact-cap acceptance, bps 0, recipient ==
+  payee) plus the four existing files' fixtures updated for the two new
+  params — 46/46 passing repo-wide, wasm release build verified.
+  **SDK:** bindings regenerated from the new wasm (never hand-edited),
+  `@docforum/escrow-sdk` **0.3.0 → 0.4.0** (breaking per hard rule 3):
+  optional `feeRecipient`/`feeBps` on `createEscrow` and both echoed by
+  `getEscrow()`; `npm run typecheck` + `npm run build` pass. **Not done:
+  transplanting this onto testnet** — the fee is in source only; a
+  redeploy + live verification (`docs/testnet-deployments.md`) is the
+  follow-up, after which SDK integration tests and the `sdk-v0.4.0`
+  tarball (ADR 0003) can follow. README contract-surface table,
+  ARCHITECTURE_ESSENTIALS.md contract surface + SDK surface updated.
+  Closes issue #30.

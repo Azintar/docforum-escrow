@@ -10,16 +10,27 @@
 
 ## Contract surface
 ```
-create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after) -> escrow_id   // IMPLEMENTED + LIVE ON TESTNET (Phase E1 + E2 + E4)
+create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after, fee_recipient, fee_bps) -> escrow_id   // IMPLEMENTED (Phase E1 + E2 + E4 + E5); LIVE ON TESTNET through Phase E4 only — the fee is the not-yet-redeployed addition
 get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded — IMPLEMENTED + LIVE ON TESTNET (Phase E1)
-get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releaser, refund_after — IMPLEMENTED + LIVE ON TESTNET (Phase E4)
-release(escrow_id, caller) -> result   // IMPLEMENTED + LIVE ON TESTNET (Phase E2) — only escrow_id's `releaser` may call this, only while Funded
-refund(escrow_id, caller) -> result    // IMPLEMENTED + LIVE ON TESTNET (Phase E2 + E4) — releaser always; anyone too, once refund_after has passed, and then still only back to payer
+get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releaser, refund_after, fee_recipient, fee_bps — IMPLEMENTED (Phase E4 + E5); the testnet deployment predates the fee fields
+release(escrow_id, caller) -> result   // IMPLEMENTED + LIVE ON TESTNET (Phase E2) — only escrow_id's `releaser` may call this, only while Funded; takes any declared fee off the top and pays the remainder to the payee
+refund(escrow_id, caller) -> result    // IMPLEMENTED + LIVE ON TESTNET (Phase E2 + E4) — releaser always; anyone too, once refund_after has passed, and then still only back to payer, with the FULL amount (no fee on refund)
 ```
-`create_escrow`'s param order in code is `(payer, payee, token, amount, condition_ref, releaser, refund_after)` —
-`token` before `amount`, `releaser` added by Phase E2 and `refund_after`
-by Phase E4, both last; no behavioral difference beyond the added
-params, just noting it so this doc and `src/lib.rs` don't drift.
+`create_escrow`'s param order in code is `(payer, payee, token, amount, condition_ref, releaser, refund_after, fee_recipient, fee_bps)` —
+`token` before `amount`, `releaser` added by Phase E2, `refund_after`
+by Phase E4 and the fee pair by Phase E5, all appended last; no
+behavioral difference beyond the added params, just noting it so this
+doc and `src/lib.rs` don't drift.
+
+The optional protocol fee (`fee_recipient`/`fee_bps`, `docs/adr/0005`):
+set once at creation, taken **off the top** at `release` —
+`⌊amount × fee_bps ÷ 10 000⌋` to `fee_recipient`, the exact remainder to
+`payee` — never on `refund`, which always returns the full `amount` to
+the payer. `fee_bps` is capped at `MAX_FEE_BPS` = 1 000 (10 %) with floor
+rounding; `fee_recipient` must not be the contract itself; both params
+must be given together or both omitted, or creation fails with
+`InvalidFee` (error 7). They are readable from `get_escrow`, so the payer
+and payee alike can check the exact deal before relying on the escrow.
 
 All five functions are proven live on testnet as of the Phase E4
 redeployment (`docs/testnet-deployments.md`, 2026-10-08 entry) — including
@@ -54,6 +65,13 @@ await client.refund({ escrowId, caller });   // { txHash } — releaser always; 
 in the future or the contract rejects with `InvalidRefundAfter`); omit it
 for no timeout, which behaves exactly as this contract did before the
 param existed.
+`feeRecipient`/`feeBps` on `createEscrow` are optional as a pair — both
+given or both omitted (`InvalidFee`, error 7, otherwise): at release
+`feeBps` basis points of `amount` (≤ 1 000 = 10 %, floored) go to
+`feeRecipient`, the remainder to the payee, and nothing at all on
+refund (docs/adr/0005). `getEscrow()` returns `feeRecipient`/`feeBps`
+as set at creation (`undefined` = no fee), so a consumer can show
+payer and payee the exact deal before the funds are locked.
 `sdk/src/generated/contract-client.ts` is machine-generated
 (`stellar contract bindings typescript --wasm ...`) — never hand-edit it;
 regenerate it whenever the contract's public signatures/types change.

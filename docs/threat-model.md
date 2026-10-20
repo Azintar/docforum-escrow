@@ -30,6 +30,7 @@ in this document still describes the same design.*
 | I3 | Each escrow pays out at most once. | `status == Funded` check before transfer, status written after — shared by release and both refund paths. |
 | I4 | An escrow only exists if `amount` was actually transferred in. | `payer.require_auth()` + token `transfer` before the escrow is stored (`lib.rs:96-112`). |
 | I5 | The contract never interprets `condition_ref`. | No code reads it after storage (ADR 0001). |
+| I6 | A declared fee takes exactly once per release: `⌊amount × fee_bps ÷ 10 000⌋` (≤ 10 %) to the `fee_recipient` fixed at creation, the remainder to `payee` — the two sum to exactly `amount` — and no fee ever moves on the refund path. | Fee is validated before funds are locked at creation (`InvalidFee` for a half-set pair, `bps` > 1 000 or a self-recipient; overflow rejected via checked math), computed with floor rounding at release (`fee_amount`), and `refund` never reads the fee fields (ADR 0005, issue #30). Split-payout features (if any land later) must divide the fee-free net, not re-charge the bps. |
 
 I1 is the most important property in this design. A full compromise of the
 `releaser` key lets an attacker pick the **wrong outcome** (release when it

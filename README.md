@@ -5,7 +5,7 @@
 ![Stack](https://img.shields.io/badge/contract-Rust%20%2F%20Soroban-orange.svg)
 ![Network](https://img.shields.io/badge/network-testnet%20only-important.svg)
 
-**🔗 Live on testnet:** [`CAHQ4J3T23WSIBBG6SI6EAYR5Q2HIPKG5YMC4SMZBOTYA6MYK2VADEV5`](https://stellar.expert/explorer/testnet/contract/CAHQ4J3T23WSIBBG6SI6EAYR5Q2HIPKG5YMC4SMZBOTYA6MYK2VADEV5) — current deployment (Phase E4: adds the `refund_after` timeout refund), verified with real calls, not just uploaded. History and details: [`docs/testnet-deployments.md`](docs/testnet-deployments.md).
+**🔗 Live on testnet:** [`CAHQ4J3T23WSIBBG6SI6EAYR5Q2HIPKG5YMC4SMZBOTYA6MYK2VADEV5`](https://stellar.expert/explorer/testnet/contract/CAHQ4J3T23WSIBBG6SI6EAYR5Q2HIPKG5YMC4SMZBOTYA6MYK2VADEV5) — current deployment (Phase E4: adds the `refund_after` timeout refund), verified with real calls, not just uploaded. History and details: [`docs/testnet-deployments.md`](docs/testnet-deployments.md). The optional protocol fee ([ADR 0005](docs/adr/0005-protocol-fee-at-release.md)) is implemented and tested in source but **not yet in that deployment** — a redeploy is the follow-up step before the fee can be used on testnet.
 
 A [Soroban](https://developers.stellar.org/docs/build/smart-contracts) (Stellar) smart contract for conditional payment escrow — lock funds, and release them to the payee only when release is authorized, or return them to the payer on refund. Paired with a TypeScript client SDK, `@docforum/escrow-sdk`.
 
@@ -40,11 +40,11 @@ Two reasons, stated plainly rather than blended together:
 
 | Function | Status | Description |
 |---|---|---|
-| `create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after) -> escrow_id` | ✅ Implemented | Pulls `amount` of `token` from `payer` (requires `payer` auth), stores an opaque `condition_ref`, sets status `Funded`. Rejects non-positive amounts, and any `refund_after` that isn't strictly in the future. |
+| `create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after, fee_recipient, fee_bps) -> escrow_id` | ✅ Implemented | Pulls `amount` of `token` from `payer` (requires `payer` auth), stores an opaque `condition_ref`, sets status `Funded`. Rejects non-positive amounts, any `refund_after` that isn't strictly in the future, and any invalid fee (a half-set pair, `fee_bps` > 10 %, or a `fee_recipient` equal to the contract itself) — see [ADR 0005](docs/adr/0005-protocol-fee-at-release.md). |
 | `get_status(escrow_id) -> EscrowStatus` | ✅ Implemented | Read-only. Errors on an unknown id. |
-| `get_escrow(escrow_id) -> EscrowData` | ✅ Implemented | Read-only: everything stored about the escrow, including `releaser` and `refund_after`, so payees can check the deal before relying on it. |
-| `release(escrow_id, caller) -> Result<()>` | ✅ Implemented | Restricted to the escrow's designated `releaser`; moves funds to `payee`. Never gated by `refund_after`. |
-| `refund(escrow_id, caller) -> Result<()>` | ✅ Implemented | Returns funds to `payer`. The `releaser` may always call it; once `refund_after` has passed, anyone may — still only back to `payer` (see [ADR 0004](docs/adr/0004-timeout-refund-path.md)). |
+| `get_escrow(escrow_id) -> EscrowData` | ✅ Implemented | Read-only: everything stored about the escrow, including `releaser`, `refund_after` and the optional fee (`fee_recipient`/`fee_bps`), so payers and payees can check the deal before relying on it. |
+| `release(escrow_id, caller) -> Result<()>` | ✅ Implemented | Restricted to the escrow's designated `releaser`; pays the optional protocol fee to `fee_recipient` and the remainder to `payee` — the two always sum to exactly the escrowed `amount`. Never gated by `refund_after`. |
+| `refund(escrow_id, caller) -> Result<()>` | ✅ Implemented | Returns the **full** `amount` to `payer` — a fee is never taken on the refund path (see [ADR 0005](docs/adr/0005-protocol-fee-at-release.md)). The `releaser` may always call it; once `refund_after` has passed, anyone may. |
 
 ```
 EscrowStatus = Funded | Released | Refunded
@@ -107,7 +107,7 @@ Requires a Rust toolchain with the `wasm32v1-none` target.
 git clone https://github.com/DocForum/docforum-escrow.git
 cd docforum-escrow/contracts/escrow
 
-# Run the test suite (28 tests, all passing today)
+# Run the test suite (46 tests, all passing today)
 cargo test
 
 # Build the deployable contract
