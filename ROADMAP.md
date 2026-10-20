@@ -213,6 +213,30 @@ An opt-in creation method can require the payee to authorize `accept` before rel
   on failure. Re-entry tests cover release/refund/create attempts. ADR 0005
   and threat-model T11 document the decision. Deployed on testnet
   2026-10-20.
+- [x] Emergency pause that can only stop new deposits — issue #35.
+  `docs/adr/0011`: one `pause_admin` address fixed at deployment by
+  `__constructor(allowed_tokens, pause_admin)`, which may `pause`/`unpause`
+  a flag that blocks **every deposit path** — `create_escrow` and its
+  variants (they share `create_escrow_inner`) plus `top_up` — and nothing
+  else. `release`, `refund` and the timeout refund never read it, so a
+  pause can never lock existing funds (invariant I7, threat model T12).
+  Alternatives rejected in the ADR: permissionless pause (trivial
+  griefing), auto-expiring pause (silently lapses mid-incident), token
+  allowlist (a different problem), and doing nothing. New append-only error
+  codes `Paused = 26`, `AlreadyPaused = 27`, `NotPaused = 28`;
+  `Paused`/`Unpaused` events carry the custodian. 17 tests in
+  `contracts/escrow/tests/pause.rs`, including release, releaser refund,
+  stranger timeout refund, and release-after-deadline while paused, plus a
+  year-long pause leaving nothing stuck and `top_up` blocked. SDK minor
+  changeset with `pause`/`unpause`/`isPaused`/`getPauseAdmin` and
+  regenerated bindings. Not yet redeployed to testnet — the current
+  deployment predates the constructor and cannot pause.
+- [ ] Redeploy to testnet with the new constructor (`allowed_tokens`,
+  `pause_admin`) and verify `pause`/`unpause` live, including a release
+  while paused.
+- [ ] Decide the mainnet custodian: a Stellar multisig account (2-of-3)
+  held in a KMS/HSM — no contract change needed, it is the deploy-time
+  `pause_admin` argument (threat model T12).
 ## Phase E6 — SDK & integrator tooling
 - [x] Escrow lifecycle snapshots and a configurable SubQuery indexer with a typed, paginated SDK query client (issue #87). Operators provide the deployed contract and starting ledger; no hosted indexer is assumed.
 - [x] Automated npm release workflow (`.github/workflows/release-sdk.yml`),
