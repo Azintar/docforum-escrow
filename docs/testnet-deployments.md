@@ -1,5 +1,12 @@
 # Testnet deployments
 
+> **Note (2026-10-20):** every deployment recorded below predates Phase E5's
+> `__constructor(pause_admin)` (issue #35, `docs/adr/0005`), so **none of
+> them has the emergency pause** and none can be upgraded to it in place —
+> a constructor is part of the instance's deployment. Redeploying is tracked
+> as an open item in `ROADMAP.md`; these entries stay as accurate history of
+> what was actually deployed at the time.
+
 ## `docforum_escrow` — 2026-10-08 (Phase E4: `refund_after` timeout refund + `get_escrow`)
 
 | | |

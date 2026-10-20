@@ -3,7 +3,7 @@
 > Update this file on every contribution that starts/completes/blocks an
 > item below.
 
-**Status: Phase E1 done. Phase E2 done and live on testnet. Phase E3's `create_escrow`/`get_status`/`release`/`refund` wrapping done; SDK distribution decided (issue #5 closed — GitHub Release tarball, ADR 0003). Phase E4 (security review, issue #6) in progress: threat model drafted (`docs/threat-model.md`) and the timeout-refund item closed (issue #11 — ADR 0004 + implementation, live on testnet); independent review not yet done — blocking for any mainnet use.**
+**Status: Phase E1 done. Phase E2 done and live on testnet. Phase E3's `create_escrow`/`get_status`/`release`/`refund` wrapping done; SDK distribution decided (issue #5 closed — GitHub Release tarball, ADR 0003). Phase E4 (security review, issue #6) in progress: threat model drafted (`docs/threat-model.md`) and the timeout-refund item closed (issue #11 — ADR 0004 + implementation, live on testnet); independent review not yet done — blocking for any mainnet use. Phase E5's emergency pause (issue #35) is implemented and tested (ADR 0005) but not yet deployed — it adds a constructor, so the current testnet deployment cannot pause.**
 
 ## Phase E1 — Contract skeleton
 - [x] Soroban project scaffold (`contracts/escrow`), builds to wasm
@@ -122,6 +122,34 @@
   full-record read (Medium), [#14](https://github.com/DocForum/docforum-escrow/issues/14) offline SDK unit tests in CI
   (Medium).
 
+## Phase E5 — Contract features
+- [x] Emergency pause that can only stop new escrows — issue #35.
+  Decided in `docs/adr/0005`: one `pause_admin` address fixed at
+  deployment by `__constructor`, which may `pause`/`unpause` a flag that
+  blocks **`create_escrow` only**. `release`, `refund` and the timeout
+  refund never read it, so a pause can never lock existing funds
+  (invariant I6, threat model §1). Alternatives compared and rejected in
+  the ADR: permissionless pause (trivial griefing), auto-expiring pause
+  (silently lapses mid-incident), token allowlist (a different problem),
+  and doing nothing. New error codes `Paused = 7`, `AlreadyPaused = 8`,
+  `NotPaused = 9`; `Paused`/`Unpaused` events carry the custodian. 16 new
+  tests in `contracts/escrow/tests/pause.rs`, including release, releaser
+  refund, stranger timeout refund, and release-after-deadline **while
+  paused**, plus a year-long pause leaving nothing stuck. 47/47 contract
+  tests pass, wasm release build verified. The constructor is a
+  deployment change → SDK bindings regenerated and
+  `@docforum/escrow-sdk` bumped **0.3.0 → 0.4.0** (`pause`/`unpause`/
+  `isPaused`/`getPauseAdmin`). `ARCHITECTURE_ESSENTIALS.md`, `README.md`
+  and `docs/threat-model.md` (§1 I6, §2 actor, T7, new T11, §6) updated.
+  Closes issue #35.
+- [ ] Redeploy to testnet with the new constructor (`pause_admin`) and
+  verify `pause`/`unpause` live, including a release while paused. The
+  current deployment predates the constructor, so it has no pause at all
+  and cannot be upgraded in place.
+- [ ] Decide the mainnet custodian: a Stellar multisig account (2-of-3),
+  held in a KMS/HSM — no contract change needed, it is the deploy-time
+  `pause_admin` argument (threat model T11).
+
 ## Explicitly out of scope for this repo
 - Any healthcare-specific logic (see README).
 - Fiat on/off-ramp, KYC — that's `docforum-core`'s concern if/when it
@@ -129,6 +157,38 @@
   repo's.
 
 ## Changelog
+- 2026-10-20 — Closed issue #35 (Phase E5: emergency pause that can only
+  stop new escrows). **ADR first:** `docs/adr/0005` picks a single
+  `pause_admin` address fixed at deployment by a constructor, scoped to
+  `create_escrow` only, and compares it against a permissionless pause, an
+  auto-expiring pause, a token allowlist, and doing nothing. **Why this
+  shape:** a pause that could block `release`/`refund` would be worse than
+  no pause — it would convert a possible loss into a certain lock and
+  hand one key the power ADR 0002 rejected. So the custodian's only power
+  is refusing **new** business. **Implementation:** `__constructor`,
+  `pause`/`unpause` (custodian auth, non-idempotent
+  `AlreadyPaused`/`NotPaused`), read-only `is_paused`/`get_pause_admin`,
+  `Paused`/`Unpaused` events, and a `Paused` (7) check at the top of
+  `create_escrow` that refuses before any funds move or any id is
+  consumed. `release`/`refund` do not read the flag. **Tests:** 16 new in
+  `tests/pause.rs` — deposits blocked with nothing locked, every outbound
+  path (release, releaser refund, stranger timeout refund,
+  release-after-deadline) still working while paused, a one-year pause
+  leaving zero stuck balance, role/auth/event/state-error cases; existing
+  suites updated for the constructor (all `env.register` call sites).
+  47/47 passing, wasm release build verified. **Deployment change:** a
+  constructor is now required, so the Phase E4 testnet deployment cannot
+  pause and a redeploy is the follow-up step (recorded as an open item
+  above; `docs/testnet-deployments.md` remains an accurate record of the
+  older deployment, not retroactively edited). **SDK:** bindings
+  regenerated from the new wasm (never hand-edited; this also picked up
+  `BalanceMismatch`, which the checked-in spec had been missing since
+  #17), `@docforum/escrow-sdk` **0.3.0 → 0.4.0** (feature bump in 0.x,
+  hard rule 3) with `pause`/`unpause`/`isPaused`/`getPauseAdmin`.
+  `ARCHITECTURE_ESSENTIALS.md`, `README.md`, `docs/threat-model.md`
+  updated. **Not done:** publishing an `sdk-v0.4.0` release tarball per
+  ADR 0003 (blocked on the redeploy and the same out-of-band release
+  step as 0.3.0).
 - 2026-09-09 — Repo created as part of the DocForum 3-repo org split.
 - 2026-09-14 — Phase E1 implemented: `create_escrow`/`get_status` on
   `soroban-sdk` 27.0.6, 4 tests passing, wasm build verified. Testnet

@@ -10,18 +10,29 @@
 
 ## Contract surface
 ```
+__constructor(pause_admin)             // deploy-time only (Phase E5) — the pause custodian; no setter, no upgrade
 create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after) -> escrow_id   // IMPLEMENTED + LIVE ON TESTNET (Phase E1 + E2 + E4)
 get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded — IMPLEMENTED + LIVE ON TESTNET (Phase E1)
 get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releaser, refund_after — IMPLEMENTED + LIVE ON TESTNET (Phase E4)
 release(escrow_id, caller) -> result   // IMPLEMENTED + LIVE ON TESTNET (Phase E2) — only escrow_id's `releaser` may call this, only while Funded
 refund(escrow_id, caller) -> result    // IMPLEMENTED + LIVE ON TESTNET (Phase E2 + E4) — releaser always; anyone too, once refund_after has passed, and then still only back to payer
+pause(caller) -> result                // IMPLEMENTED (Phase E5) — custodian only; blocks create_escrow, never release/refund
+unpause(caller) -> result              // IMPLEMENTED (Phase E5) — custodian only; re-opens new deposits
+is_paused() -> bool                    // IMPLEMENTED (Phase E5) — read-only pause flag
+get_pause_admin() -> Option<Address>   // IMPLEMENTED (Phase E5) — read-only custodian address
 ```
 `create_escrow`'s param order in code is `(payer, payee, token, amount, condition_ref, releaser, refund_after)` —
 `token` before `amount`, `releaser` added by Phase E2 and `refund_after`
 by Phase E4, both last; no behavioral difference beyond the added
 params, just noting it so this doc and `src/lib.rs` don't drift.
 
-All five functions are proven live on testnet as of the Phase E4
+The Phase E5 additions (constructor + `pause`/`unpause`/`is_paused`/
+`get_pause_admin`) are implemented and tested but **not yet on testnet**:
+they change deployment (a constructor is now required), so the current
+deployment — which has no constructor and therefore no pause — predates
+them. A redeploy is the follow-up step.
+
+All five pre-E5 functions are proven live on testnet as of the Phase E4
 redeployment (`docs/testnet-deployments.md`, 2026-10-08 entry) — including
 a real timeout refund triggered by a non-releaser after its deadline, a
 real `release` after the deadline, and real rejections of a
@@ -39,6 +50,19 @@ and `release` is never gated by it, so the releaser can still release
 after the deadline (whoever lands first wins). No `refund_after` means
 behaviour is exactly what it was before: releaser-only refunds, forever.
 
+**Emergency pause (Phase E5, `docs/adr/0005`):** one address fixed at
+deployment by `__constructor` may set a flag that makes `create_escrow`
+fail with `Paused` (error 7). That is its *only* power. `release`,
+`refund` (both the releaser and timeout paths), `get_status` and
+`get_escrow` do not read the flag, so a pause can never lock funds that
+are already escrowed — the contract-side tests state that explicitly
+(`contracts/escrow/tests/pause.rs`). `pause`/`unpause` require the
+custodian's signature, are not idempotent (`AlreadyPaused`/`NotPaused`),
+and emit `Paused`/`Unpaused` events. There is no timelock on either
+direction and no unpause backdoor. Any future deposit path (e.g. a
+top-up) **must** apply the same check in the same PR; `create_escrow` is
+the only deposit path today.
+
 ## TypeScript SDK surface (`sdk/`)
 ```ts
 import { EscrowClient, Keypair } from "@docforum/escrow-sdk";
@@ -49,6 +73,10 @@ await client.getStatus(escrowId);            // "Funded" | "Released" | "Refunde
 await client.getEscrow(escrowId);            // full stored record — incl. releaser + refundAfter, so a payee can check the deal (docs/adr/0004, threat model T8)
 await client.release({ escrowId, caller });  // { txHash } — caller: Keypair, must equal the escrow's releaser
 await client.refund({ escrowId, caller });   // { txHash } — releaser always; anyone after refundAfter has passed
+await client.isPaused();                     // boolean — new deposits blocked? release/refund are unaffected
+await client.getPauseAdmin();                // custodian address, set at deploy (docs/adr/0005)
+await client.pause({ caller });              // { txHash } — caller: Keypair, must be the contract's pause custodian
+await client.unpause({ caller });            // { txHash } — same auth; re-opens new deposits
 ```
 `refundAfter` on `createEscrow` is optional (unix seconds, must be strictly
 in the future or the contract rejects with `InvalidRefundAfter`); omit it
@@ -60,6 +88,16 @@ regenerate it whenever the contract's public signatures/types change.
 `sdk/src/index.ts` is the actual public surface (hand-written, ergonomic
 wrapper) — consumers import from the package root, never from
 `src/generated/` directly.
+
+On the pause custodian: it is the one contract-level role in the design,
+and it is deliberately weaker than the contract-level admin ADR 0002
+rejected — it cannot release, refund, edit an escrow, rotate a releaser,
+or upgrade anything, so its worst case is "no new escrows here" (threat
+model T11), never "someone's money is stuck". For mainnet, pass a Stellar
+multisig account (e.g. 2-of-3) as `pause_admin`; `require_auth` honours
+that account's own thresholds, so no contract change is needed. Because
+the constructor is the only place the address is set, changing custodians
+means deploying a new contract id.
 
 `condition_ref` is an **opaque string/id** the contract does not interpret
 — it's the caller's job (e.g. `docforum-core`) to decide when release is
@@ -84,7 +122,10 @@ honestly").
    "fix in a follow-up" territory.
 3. SDK version bumps that change the public API are breaking changes —
    semver strictly, since `docforum-core` pins a version rather than
-   tracking latest.
+   tracking latest. This repo's 0.x convention: a new (non-breaking)
+   feature bumps the minor (`0.3.0 → 0.4.0` for the Phase E5 pause
+   methods) and a breaking change bumps the minor too (`0.2.0 → 0.3.0`
+   for `refund_after`).
 4. Testnet only until a security review has happened. Do not wire mainnet
    contract addresses into the SDK's defaults.
 

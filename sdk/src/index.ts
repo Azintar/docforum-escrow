@@ -77,9 +77,19 @@ export interface ReleaseOrRefundParams {
   caller: Keypair;
 }
 
+export interface PauseParams {
+  /**
+   * Must be the contract's pause custodian — the address passed as
+   * `pause_admin` to the contract's constructor at deployment
+   * (docs/adr/0005). Not related to any escrow's `releaser`.
+   */
+  caller: Keypair;
+}
+
 /**
  * Thin client for the docforum-escrow Soroban contract. Wraps
- * `create_escrow`/`get_status`/`get_escrow`/`release`/`refund` with plain
+ * `create_escrow`/`get_status`/`get_escrow`/`release`/`refund` plus the
+ * operator-only `pause`/`unpause`/`is_paused`/`get_pause_admin` with plain
  * TypeScript types and no manual XDR/signing plumbing.
  */
 export class EscrowClient {
@@ -169,6 +179,65 @@ export class EscrowClient {
   async refund(params: ReleaseOrRefundParams): Promise<{ txHash: string }> {
     const client = this.contractClient(params.caller);
     const tx = await client.refund({ escrow_id: params.escrowId, caller: params.caller.publicKey() });
+    const sent = await tx.signAndSend();
+    sent.result.unwrap();
+    return { txHash: sent.sendTransactionResponse!.hash };
+  }
+
+  /**
+   * Read-only: is the emergency pause currently blocking **new** escrows?
+   * Says nothing about existing ones — `release` and `refund` work either
+   * way, so a paused contract can never trap escrowed funds
+   * (docs/adr/0005).
+   */
+  async isPaused(): Promise<boolean> {
+    const client = this.contractClient();
+    // `is_paused` returns a bare bool, not a `Result`, so the simulation
+    // result is the value itself (absent only if the call wasn't simulated).
+    const { result } = await client.is_paused();
+    if (result === undefined) {
+      throw new Error("is_paused simulation returned no result");
+    }
+    return result;
+  }
+
+  /**
+   * Read-only: the address allowed to pause/unpause, set at deployment.
+   * `undefined` only for a contract instance deployed without a
+   * constructor, which the current WASM does not allow. Worth checking
+   * before relying on who can stop new deposits (docs/adr/0005).
+   */
+  async getPauseAdmin(): Promise<string | undefined> {
+    const client = this.contractClient();
+    // The generated client types a contract `Option<Address>` as
+    // `string | undefined`, which is already this SDK's convention.
+    const { result } = await client.get_pause_admin();
+    return result;
+  }
+
+  /**
+   * Stops **new** escrows (`createEscrow`) until `unpause` is called.
+   * Only the contract's pause custodian may call this, and must sign it.
+   * Existing escrows are untouched: `release`/`refund` keep working while
+   * paused (docs/adr/0005). Throws if `caller` isn't the custodian, or if
+   * the contract is already paused. Returns the transaction's hash.
+   */
+  async pause(params: PauseParams): Promise<{ txHash: string }> {
+    const client = this.contractClient(params.caller);
+    const tx = await client.pause({ caller: params.caller.publicKey() });
+    const sent = await tx.signAndSend();
+    sent.result.unwrap();
+    return { txHash: sent.sendTransactionResponse!.hash };
+  }
+
+  /**
+   * Re-opens new escrows after a `pause`. Same custodian-only auth. Throws
+   * if `caller` isn't the custodian, or if the contract isn't paused.
+   * Returns the transaction's hash.
+   */
+  async unpause(params: PauseParams): Promise<{ txHash: string }> {
+    const client = this.contractClient(params.caller);
+    const tx = await client.unpause({ caller: params.caller.publicKey() });
     const sent = await tx.signAndSend();
     sent.result.unwrap();
     return { txHash: sent.sendTransactionResponse!.hash };

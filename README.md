@@ -45,6 +45,9 @@ Two reasons, stated plainly rather than blended together:
 | `get_escrow(escrow_id) -> EscrowData` | ✅ Implemented | Read-only: everything stored about the escrow, including `releaser` and `refund_after`, so payees can check the deal before relying on it. |
 | `release(escrow_id, caller) -> Result<()>` | ✅ Implemented | Restricted to the escrow's designated `releaser`; moves funds to `payee`. Never gated by `refund_after`. |
 | `refund(escrow_id, caller) -> Result<()>` | ✅ Implemented | Returns funds to `payer`. The `releaser` may always call it; once `refund_after` has passed, anyone may — still only back to `payer` (see [ADR 0004](docs/adr/0004-timeout-refund-path.md)). |
+| `pause(caller)` / `unpause(caller)` | ✅ Implemented | Emergency switch for **new deposits only**, callable only by the custodian set at deploy. Emits `Paused`/`Unpaused` events (see [ADR 0005](docs/adr/0005-emergency-pause-for-new-deposits-only.md)). |
+| `is_paused() -> bool` | ✅ Implemented | Read-only: is `create_escrow` currently blocked? Says nothing about existing escrows. |
+| `get_pause_admin() -> Option<Address>` | ✅ Implemented | Read-only: who may pause/unpause — set once by the contract's `__constructor`. |
 
 ```
 EscrowStatus = Funded | Released | Refunded
@@ -56,6 +59,29 @@ That's the answer to "what if the releaser's key is lost?" (threat model
 T2): instead of locking funds permanently, a deadline lets anyone return
 them to the payer. See [ADR 0004](docs/adr/0004-timeout-refund-path.md)
 for the decision and what it means for payees.
+
+### Emergency pause
+
+If a bug turns up after mainnet, the alternative to a pause is asking every
+integrator to stop calling the contract. Since issue #35 there is a narrow
+on-chain lever instead: one `pause_admin` address, fixed at deployment by
+the contract's constructor, can flip a flag that makes `create_escrow` fail
+with `Paused` (error 7).
+
+Nothing else changes. `release`, `refund`, and the timeout refund never read
+the flag, so **a pause can never lock funds that are already escrowed** —
+paused means "no new business", never "your money is stuck". The pause has
+no timelock, no second role, and no power over existing escrows; unpausing
+is the same custodian calling `unpause`. See
+[ADR 0005](docs/adr/0005-emergency-pause-for-new-deposits-only.md) for the
+design, the rejected alternatives (permissionless pause, auto-expiring
+pause), and the threat model's T11 for the residual liveness risk.
+
+For mainnet, pass a Stellar multisig account as `pause_admin` — no contract
+change needed, since `require_auth` honours that account's own signer
+thresholds. **Note:** this changes deployment (the constructor is now
+required), so the current testnet deployment predates it and cannot pause;
+a redeploy is the follow-up step.
 
 **Design rule, enforced deliberately:** the contract decides **who** may
 call `release`/`refund`, never **why**. `condition_ref` is an opaque
@@ -93,7 +119,8 @@ contracts/escrow/
   tests/            Integration tests (soroban-sdk testutils) — required for any contract change
   Cargo.toml
 sdk/
-  src/index.ts      @docforum/escrow-sdk — TypeScript client (not yet implemented, see issue #4)
+  src/index.ts      @docforum/escrow-sdk — hand-written TypeScript client
+  src/generated/    machine-generated contract bindings (never hand-edited)
   package.json
 docs/adr/           Architecture decision records
 .github/            CI workflow, issue/PR templates
@@ -107,7 +134,7 @@ Requires a Rust toolchain with the `wasm32v1-none` target.
 git clone https://github.com/DocForum/docforum-escrow.git
 cd docforum-escrow/contracts/escrow
 
-# Run the test suite (28 tests, all passing today)
+# Run the test suite (47 tests, all passing today)
 cargo test
 
 # Build the deployable contract
@@ -121,17 +148,21 @@ contract id, transaction links, and the exact `stellar` CLI commands to
 redeploy. **Mainnet is out of scope until the Phase E4 security review is
 complete — see [hard rule 4](ARCHITECTURE_ESSENTIALS.md#hard-rules).**
 
-The TypeScript SDK (`sdk/`) is still a placeholder — see
-[issue #4](https://github.com/DocForum/docforum-escrow/issues/4).
+The TypeScript SDK (`sdk/`, `@docforum/escrow-sdk` **0.4.0**) wraps all of
+the above, including the pause methods — see
+[ADR 0003](docs/adr/0003-sdk-distribution-github-release-tarball.md) for
+how it is distributed.
 
 ## Documentation
 
 | Doc | Purpose |
 |---|---|
 | [`ARCHITECTURE_ESSENTIALS.md`](ARCHITECTURE_ESSENTIALS.md) | Stack, contract surface, hard rules (no PHI ever, tests required for contract changes, testnet-only until security review). |
-| [`ROADMAP.md`](ROADMAP.md) | Phase E1–E4 breakdown and current status. |
+| [`ROADMAP.md`](ROADMAP.md) | Phase E1–E5 breakdown and current status. |
 | [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) | Rules for coding agents working in this repo — read `README.md` + `ARCHITECTURE_ESSENTIALS.md` first; you should rarely need `docforum-core`'s docs to work here. |
 | [`docs/adr/0001-generic-escrow-not-healthcare-specific.md`](docs/adr/0001-generic-escrow-not-healthcare-specific.md) | Why the contract stays domain-blind. |
+| [`docs/adr/0005-emergency-pause-for-new-deposits-only.md`](docs/adr/0005-emergency-pause-for-new-deposits-only.md) | The deposit-only emergency pause: who may pause, what it can and cannot touch, how to unpause. |
+| [`docs/threat-model.md`](docs/threat-model.md) | Threats, invariants and the pre-mainnet checklist (Phase E4 draft, not a review). |
 
 ## Project status
 
