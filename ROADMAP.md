@@ -213,6 +213,22 @@ An opt-in creation method can require the payee to authorize `accept` before rel
   on failure. Re-entry tests cover release/refund/create attempts. ADR 0005
   and threat-model T11 document the decision. Deployed on testnet
   2026-10-20.
+- [x] Optional protocol fee taken at release, with recipient and bps fixed
+  at creation — issue #30. `docs/adr/0010`: an optional
+  `fee_recipient`/`fee_bps` pair (atomic — a half-set pair is rejected),
+  capped at 10 % (`MAX_FEE_BPS = 1_000`), taken **off the top** at release
+  — `⌊amount × fee_bps ÷ 10 000⌋` to `fee_recipient`, the exact remainder
+  to `payee` (floor rounding, so fee + payout always equal the stored
+  `amount`) — and **never** on `refund`, which still returns the full
+  `amount`. `fee_recipient` may not be the escrow contract itself.
+  Both fields are readable from `get_escrow` before funds are locked.
+  `create_escrow` and `create_escrow_release_time` take the pair; the
+  acceptance and M-of-N entry points remain fee-free. `top_up` grows the
+  escrowed amount and therefore the bps fee, re-checking the fee math
+  before its transfer. New append-only `Error::InvalidFee = 25`, new
+  invariant I6, 17 tests in `tests/protocol_fee.rs`. Breaking read shape
+  and creation signature → SDK minor changeset and regenerated bindings.
+  **Not yet on testnet** — the live deployment predates the fee.
 ## Phase E6 — SDK & integrator tooling
 - [x] Escrow lifecycle snapshots and a configurable SubQuery indexer with a typed, paginated SDK query client (issue #87). Operators provide the deployed contract and starting ledger; no hosted indexer is assumed.
 - [x] Automated npm release workflow (`.github/workflows/release-sdk.yml`),
