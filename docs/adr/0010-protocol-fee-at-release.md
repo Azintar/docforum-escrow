@@ -1,4 +1,4 @@
-# ADR 0005: Optional protocol fee, fixed at creation and taken at release
+# ADR 0010: Optional protocol fee, fixed at creation and taken at release
 
 Status: Accepted (2026-10-20)
 
@@ -40,7 +40,10 @@ Constraints any decision here has to respect:
 `create_escrow` gains two final parameters, `fee_recipient: Option<Address>`
 and `fee_bps: Option<u32>`, accepted together or not at all: a
 recipient without a rate, or a rate without a recipient, is rejected at
-creation with `Error::InvalidFee`.
+creation with `Error::InvalidFee`. `create_escrow_release_time` gains the
+same pair (the SDK routes its `releaseNotBefore` path through it); the
+acceptance and M-of-N creation entry points do not take a fee and record
+none. Fee-free escrows are byte-for-byte the previous behaviour.
 
 *Revision note (2026-10-20, same day as initial acceptance, implementation
 feedback):* the decision was originally written as one optional
@@ -63,10 +66,11 @@ a half-pair because creation is the only writer.
 
 Basis points: 10 000 bps = 100 %. The cap is a contract constant
 (`MAX_FEE_BPS = 1_000`), enforced at creation with the new
-`Error::InvalidFee = 7` (next unused code — 5 is live on testnet as
-`InvalidRefundAfter` and 6 is kept for `BalanceMismatch`; error numbering
-inside the contract is part of the ABI and may never be reshuffled — the
-2026-10-08 `#17`/`#18` merge incident is the standing warning).
+`Error::InvalidFee = 25` (the next unused code on top of the current
+surface; every existing code keeps its number because consumers map codes,
+not names — the 2026-10-08 `#17`/`#18` merge incident is the standing
+warning). The code is reserved here even while the pause ADR reserves
+26–28, so the two changes cannot collide when they land in either order.
 
 `bps = 0` with a set recipient is accepted, not rejected: it lets an
 integrator declare a fee slot that currently takes nothing (e.g. a
@@ -95,7 +99,10 @@ Because `bps ≤ 1000`, `amount × bps` cannot overflow `i128` for any
 amount a token contract can hold — but the multiplication is still
 `checked_mul`-guarded, and overflow is rejected at creation as
 `InvalidFee` (fail-closed: a recoverable, typed error the caller sees,
-not a panic).
+not a panic). A `top_up` raises the stored `amount`, so it raises the
+bps fee with it; the fee math for the larger amount is re-checked before
+the top-up transfer and rejected with `InvalidFee` rather than failing
+the later release.
 
 Consequence, accepted and tested: for tiny amounts the fee can floor to
 zero (e.g. a 305-unit escrow at 10 % pays a fee of 30, not 30.5 — and a
@@ -162,28 +169,35 @@ and no fee can be introduced, changed, or removed after creation.
 
 ## Consequences
 
-- **`create_escrow`'s signature changed** — a breaking change, the third
-  parameter added since Phase E1 (`releaser` by ADR 0002, `refund_after`
-  by ADR 0004, `fee` here). The contract must be redeployed; the current
-  testnet deployment is superseded once this lands, and keeps its record
-  as history in `docs/testnet-deployments.md`.
+- **`create_escrow`'s signature changed** — a breaking change. Every
+  earlier parameter keeps its position and the fee pair is appended after
+  `refund_to`, so only callers that construct the call by position (the
+  generated bindings and Rust clients) need updating. The contract must
+  be redeployed; the current testnet deployment predates the fee and keeps
+  its record as history in `docs/testnet-deployments.md`.
 - **Storage layout changed** (`EscrowData` gains `fee_recipient` and
   `fee_bps`, as optional fields never stored half-set), so
   the old contract id is not layout-compatible with the new source. No
   migration of live escrows is needed or possible — old deployments keep
   settling their escrows fee-free, exactly as they always did.
 - **SDK**: bindings regenerated from the new WASM (never hand-edited),
-  `@docforum/escrow-sdk` bumped **0.3.0 → 0.4.0** (breaking under hard
-  rule 3; in 0.x a breaking change bumps the minor). `createEscrow`
-  gains optional `feeRecipient`/`feeBps` parameters; `getEscrow()`
-  surfaces what was declared — payer and payee alike can read the fee
-  before relying on the escrow (the issue's motivating requirement).
-- **Migration for `docforum-core`**: 1. pass `feeRecipient: undefined,
-  feeBps: undefined` for fee-free escrows (semantics unchanged from
-  0.3.x); 2. pass `feeRecipient: <address>, feeBps: <0..1000>` where a
-  platform fee applies, with the cap enforced on-chain; 3. read
+  `@docforum/escrow-sdk` gets a minor changeset (**0.6.0 → 0.7.0** on the
+  next release; breaking under hard rule 3, where 0.x bumps the minor).
+  `createEscrow` gains optional `feeRecipient`/`feeBps` parameters and
+  validates the pair client-side (both-or-neither, 0..=1 000);
+  `getEscrow()` surfaces what was declared — payer and payee alike can
+  read the fee before relying on the escrow (the issue's motivating
+  requirement).
+- **Event payload**: the `ESCROW` state snapshot appends the fee as one
+  nested `(fee_recipient, fee_bps)` pair. It is nested because
+  soroban-sdk supports event data tuples of at most 13 values and the
+  snapshot already had 12; keeping the pair atomic also mirrors storage.
+- **Migration for `docforum-core`**: 1. omit `feeRecipient`/`feeBps` for
+  fee-free escrows (semantics unchanged from 0.6.x); 2. pass
+  `feeRecipient: <address>, feeBps: <0..1000>` where a platform fee
+  applies, with the cap enforced on-chain; 3. read
   `getEscrow(...).feeRecipient` / `.feeBps` where the UI should show the
   platform's cut.
-- **New error code**: `Error::InvalidFee = 7`.
+- **New error code**: `Error::InvalidFee = 25`.
 - The redeployment is testnet-only and needs the Phase E4 security
   review *before* any mainnet use (hard rule 4 unchanged).
