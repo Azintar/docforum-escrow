@@ -10,30 +10,64 @@
 
 ## Contract surface
 ```
-__constructor(pause_admin)             // deploy-time only (Phase E5) — the pause custodian; no setter, no upgrade
-create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after) -> escrow_id   // IMPLEMENTED + LIVE ON TESTNET (Phase E1 + E2 + E4)
+__constructor(allowed_tokens: Vec<Address>, pause_admin: Address)    // immutable token allowlist (empty = allow all) + the one pause custodian; no setter, no upgrade
+pause(caller) -> result                // IMPLEMENTED (Phase E5, ADR 0011) — custodian only; blocks every deposit path, never release/refund
+unpause(caller) -> result              // IMPLEMENTED (Phase E5, ADR 0011) — custodian only; re-opens new deposits
+is_paused() -> bool                    // IMPLEMENTED (Phase E5, ADR 0011) — read-only pause flag
+get_pause_admin() -> Option<Address>   // IMPLEMENTED (Phase E5, ADR 0011) — read-only custodian address
+create_escrow(payer, payee, token, amount, condition_ref, releaser, refund_after, notify_payee, refund_to) -> escrow_id   // Phase E5 callback + sponsored refund destination (ADR 0009); deployed on testnet
+create_escrow_with_acceptance(..., requires_acceptance, refund_to) -> escrow_id   // optional payee acceptance gate; deployed on testnet
+accept(escrow_id, payee) -> ()   // payee-authorized, one-time acceptance before release; deployed on testnet
+create_escrow_with_releasers(payer, payee, token, amount, condition_ref, releasers, threshold, refund_after, notify_payee, refund_to) -> escrow_id // IMPLEMENTED (Phase E5, issue #119, ADR 0007) — M-of-N, deployed on testnet
 get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded — IMPLEMENTED + LIVE ON TESTNET (Phase E1)
-get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releaser, refund_after — IMPLEMENTED + LIVE ON TESTNET (Phase E4)
-release(escrow_id, caller) -> result   // IMPLEMENTED + LIVE ON TESTNET (Phase E2) — only escrow_id's `releaser` may call this, only while Funded
-refund(escrow_id, caller) -> result    // IMPLEMENTED + LIVE ON TESTNET (Phase E2 + E4) — releaser always; anyone too, once refund_after has passed, and then still only back to payer
-pause(caller) -> result                // IMPLEMENTED (Phase E5) — custodian only; blocks create_escrow, never release/refund
-unpause(caller) -> result              // IMPLEMENTED (Phase E5) — custodian only; re-opens new deposits
-is_paused() -> bool                    // IMPLEMENTED (Phase E5) — read-only pause flag
-get_pause_admin() -> Option<Address>   // IMPLEMENTED (Phase E5) — read-only custodian address
+get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releasers, threshold, refund_after, refund_to — IMPLEMENTED (Phase E4 + E5; `releaser` became `releasers`+`threshold` in #119)
+release(escrow_id, caller) -> result   // IMPLEMENTED (Phase E2) — a releaser, threshold must be 1, only while Funded
+release_with_approvals(escrow_id, approvers) -> result   // IMPLEMENTED (Phase E5, issue #119, ADR 0007) — >= threshold distinct releasers, each authorizing this invocation
+refund(escrow_id, caller) -> result    // IMPLEMENTED (Phase E2 + E4) — a releaser when threshold is 1; anyone too, once refund_after has passed, and then still only to the stored `refund_to` (= payer unless set at creation, ADR 0009)
+refund_with_approvals(escrow_id, approvers) -> result    // IMPLEMENTED (Phase E5, issue #119) — same approval rules as release_with_approvals
+top_up(escrow_id, payer, amount) -> result // IMPLEMENTED (issue #26) — original payer only, funded state only; emits `top_up`
+rotate_releaser(escrow_id, caller, new_releaser) -> result // IMPLEMENTED (issue #23) — single-releaser escrow only; current releaser and payer authorize; funded only
 ```
-`create_escrow`'s param order in code is `(payer, payee, token, amount, condition_ref, releaser, refund_after)` —
-`token` before `amount`, `releaser` added by Phase E2 and `refund_after`
-by Phase E4, both last; no behavioral difference beyond the added
-params, just noting it so this doc and `src/lib.rs` don't drift.
 
-The Phase E5 additions (constructor + `pause`/`unpause`/`is_paused`/
-`get_pause_admin`) are implemented and tested but **not yet on testnet**:
-they change deployment (a constructor is now required), so the current
-deployment — which has no constructor and therefore no pause — predates
-them. A redeploy is the follow-up step.
+No new contract-level role came in with the M-of-N work: `releasers` is
+escrow data chosen by the payer at creation and immutable afterwards. There is
+still no admin over funds, no owner and no upgrade path — OpenZeppelin's
+upgradeable/access modules were evaluated and rejected in `docs/adr/0006`
+precisely because they would add one. The one contract-level role is the
+emergency-pause custodian (`pause_admin`, ADR 0011), whose only power is
+refusing **new** deposits; it cannot release, refund, edit an escrow,
+rotate a releaser or upgrade anything, and it never gates an outbound path.
 
-All five pre-E5 functions are proven live on testnet as of the Phase E4
-redeployment (`docs/testnet-deployments.md`, 2026-10-08 entry) — including
+**Emergency pause (Phase E5, `docs/adr/0011`):** one address fixed at
+deployment by `__constructor` may set a flag that makes every deposit path
+(`create_escrow` and its variants, plus `top_up`) fail with `Paused`
+(error 26). That is its *only* power. `release`, `refund` (both the
+releaser and timeout paths), `get_status` and `get_escrow` do not read the
+flag, so a pause can never lock funds that are already escrowed — the
+contract-side tests state that explicitly
+(`contracts/escrow/tests/pause.rs`). `pause`/`unpause` require the
+custodian's signature, are not idempotent (`AlreadyPaused`/`NotPaused`),
+and emit `Paused`/`Unpaused` events. There is no timelock on either
+direction and no unpause backdoor. Any future deposit path **must** apply
+the same check in the same PR.
+The allowlist is fixed when the contract is deployed. `create_escrow`
+rejects any token outside a non-empty list with `DisallowedToken` (error
+code 8); an empty list preserves the prior open-token behavior. The
+current testnet deployment includes the native XLM SAC and the
+BalanceMismatch test token in its immutable allowlist; see
+`docs/testnet-deployments.md`.
+
+`create_escrow`'s param order in code is `(payer, payee, token, amount, condition_ref, releaser, refund_after, notify_payee, refund_to)`.
+`notify_payee` opts a contract payee into `on_escrow_released(escrow_id,
+amount)`; when true, the payee must authorize creation as well as the payer.
+The quorum creation entry point has the same final callback flag. The SDK
+option defaults to false. Callback failure rolls release back atomically;
+see ADR 0005 for failure, gas, and stored-record compatibility.
+
+The current contract surface (`create_escrow`, `get_status`, `get_escrow`,
+`release`, `refund`, payee acceptance, M-of-N quorum, callbacks, and
+sponsored refund destinations) is deployed on testnet as of 2026-10-20
+(`docs/testnet-deployments.md`, latest entry) — including
 a real timeout refund triggered by a non-releaser after its deadline, a
 real `release` after the deadline, and real rejections of a
 pre-deadline stranger refund (`Error(Contract, #3)`), a deadline already
@@ -45,63 +79,103 @@ historical record.
 
 `refund_after` is an optional unix timestamp in seconds set once at
 creation (`docs/adr/0004`): after it passes **anyone** may call
-`refund`, but the destination is unchanged — always the stored `payer` —
+`refund`, but the destination is unchanged — always the stored
+`refund_to`, which is the `payer` unless set otherwise at creation —
 and `release` is never gated by it, so the releaser can still release
 after the deadline (whoever lands first wins). No `refund_after` means
 behaviour is exactly what it was before: releaser-only refunds, forever.
+The timeout is the answer to "what if the releaser's key is lost?" (threat
+model T2): instead of locking funds permanently, a deadline lets anyone
+return them.
 
-**Emergency pause (Phase E5, `docs/adr/0005`):** one address fixed at
-deployment by `__constructor` may set a flag that makes `create_escrow`
-fail with `Paused` (error 7). That is its *only* power. `release`,
-`refund` (both the releaser and timeout paths), `get_status` and
-`get_escrow` do not read the flag, so a pause can never lock funds that
-are already escrowed — the contract-side tests state that explicitly
-(`contracts/escrow/tests/pause.rs`). `pause`/`unpause` require the
-custodian's signature, are not idempotent (`AlreadyPaused`/`NotPaused`),
-and emit `Paused`/`Unpaused` events. There is no timelock on either
-direction and no unpause backdoor. Any future deposit path (e.g. a
-top-up) **must** apply the same check in the same PR; `create_escrow` is
-the only deposit path today.
+`refund_to` (Phase E5, `docs/adr/0009`) is an optional address, set at
+creation under the funder's (`payer`'s) auth, that every refund path pays
+instead of `payer`. It is stored, immutable, never supplied at payout, and
+may not be the contract itself (`InvalidRefundTo`); omitted, it equals
+`payer` and behaviour is exactly as before. Invariant I1 is therefore
+"release → stored `payee`, refund → stored `refund_to`". Make sure the
+destination can hold the token: if the transfer to it fails, so does the
+refund.
+
+`release_with_approvals`/`refund_with_approvals` check that at least
+`threshold` distinct releasers each authorized this exact invocation.
+Approvals are never stored, so nothing can be replayed, and both work
+only while the escrow is `Funded`. The payee-acceptance gate
+(`docs/adr/0008`) only blocks release: refunds never need acceptance.
+
+The contract decides **who** may call `release`/`refund`, never **why**:
+`condition_ref` is opaque to it (`docs/adr/0001`).
 
 ## TypeScript SDK surface (`sdk/`)
 ```ts
 import { EscrowClient, Keypair } from "@docforum/escrow-sdk";
 
 const client = new EscrowClient({ contractId }); // defaults: testnet RPC + passphrase
-const { escrowId, txHash } = await client.createEscrow({ payer, payee, token, amount, conditionRef, releaser, refundAfter });
+const { escrowId, txHash } = await client.createEscrow({ payer, payee, token, amount, conditionRef, releaser, refundAfter, notifyPayee: true, refundTo });
+await client.createQuorumEscrow({ payer, payee, token, amount, conditionRef, releasers, threshold, refundAfter, notifyPayee: true, refundTo }); // M-of-N, ADR 0007
 await client.getStatus(escrowId);            // "Funded" | "Released" | "Refunded"
-await client.getEscrow(escrowId);            // full stored record — incl. releaser + refundAfter, so a payee can check the deal (docs/adr/0004, threat model T8)
-await client.release({ escrowId, caller });  // { txHash } — caller: Keypair, must equal the escrow's releaser
-await client.refund({ escrowId, caller });   // { txHash } — releaser always; anyone after refundAfter has passed
-await client.isPaused();                     // boolean — new deposits blocked? release/refund are unaffected
-await client.getPauseAdmin();                // custodian address, set at deploy (docs/adr/0005)
-await client.pause({ caller });              // { txHash } — caller: Keypair, must be the contract's pause custodian
-await client.unpause({ caller });            // { txHash } — same auth; re-opens new deposits
+await client.getEscrow(escrowId);            // full stored record — incl. releasers + threshold + refundAfter, refundTo, so a payee can check the deal (docs/adr/0004/0007/0009, threat model T8)
+await client.release({ escrowId, caller });  // { txHash } — caller: Keypair or SEP-43 Signer, must be a releaser and threshold must be 1
+await client.releaseWithApprovals({ escrowId, approvers }); // { txHash } — one Keypair/Signer per approver (>= threshold, distinct)
+await client.refund({ escrowId, caller });   // { txHash } — releaser when threshold is 1; anyone after refundAfter has passed
+await client.isPaused();                     // boolean — are new deposits blocked? release/refund are unaffected
+await client.getPauseAdmin();                // custodian address set at deploy (docs/adr/0011)
+await client.pause(caller);                  // { txHash } — caller: Keypair/Signer, must be the pause custodian
+await client.unpause(caller);                // { txHash } — same authority; re-opens new deposits
+await client.refundWithApprovals({ escrowId, approvers });  // { txHash } — M-of-N refund
+await client.getEvents({ fromLedger });      // { events, nextCursor } — decoded lifecycle event page
+const stop = client.subscribe(handler, { cursor, pollIntervalMs }); // serial polling; await handler for back-pressure
+await client.estimate({ source, method, args }); // { resourceFee, inclusionFee, total, minResourceFee } — simulation only, 20% resource buffer
+client.guardSponsorship(signedXdr);          // { ok, reasons, invokedContracts } — every op + contract auth entry must target this escrow
+client.feeBump(signedXdr, sponsor, { maxFee, baseFee? }); // { xdr, fee, innerTxHash } — throws MaxFeeExceededError, never overshoots the cap
 ```
+
+`refundTo` on `createEscrow` and `createQuorumEscrow` is optional too (default: the payer) and
+`getEscrow` returns it as `refundTo`.
+
+`estimate` never signs or submits; it simulates against the client's RPC
+and reports stroops. `guardSponsorship` is the pre-sponsorship check for
+transactions that come from someone else: it rejects foreign contract
+invocations, non-invocation operations, contract-address auth entries
+pointing elsewhere, and already-bumped envelopes, while allowing the
+account auth entries (payer/releaser) a legitimate escrow call carries.
+`feeBump` charges `baseFee × (inner operations + 1)` and validates the
+cap before building the envelope, so a fee spike fails loudly instead of
+silently costing more than the sponsor agreed to.
+Event results are a discriminated union: known lifecycle events expose
+their event type and escrow id; unrecognized topics are returned as
+`type: "unknown"` with decoded topic values and payload. Persist the
+last handled event's cursor to resume; an expired RPC history cursor throws
+`EventCursorExpiredError`. These helpers require the contract lifecycle
+events tracked by issue #9; the current deployment does not emit them.
 `refundAfter` on `createEscrow` is optional (unix seconds, must be strictly
 in the future or the contract rejects with `InvalidRefundAfter`); omit it
 for no timeout, which behaves exactly as this contract did before the
 param existed.
+`MAX_RELEASERS` (10) and `MAX_CONDITION_REF_LENGTH` (64) mirror the contract's
+bounds client-side so callers fail fast. `getEscrow()` returns
+`releasers: string[]` and `threshold: number` (`releaser: string` was replaced
+in SDK 0.5.0 when the contract's `EscrowData` changed).
+On the pause custodian: it is the one contract-level role in the design, and
+it is deliberately weaker than the contract-level admin ADR 0002 rejected —
+it cannot release, refund, edit an escrow, rotate a releaser, or upgrade
+anything, so its worst case is "no new deposits on this contract id"
+(threat model T12), never "someone's money is stuck". For mainnet, pass a
+Stellar multisig account (e.g. 2-of-3) as `pause_admin`; `require_auth`
+honours that account's own thresholds, so no contract change is needed.
+Because the constructor is the only place the address is set, changing
+custodians means deploying a new contract id.
+
 `sdk/src/generated/contract-client.ts` is machine-generated
 (`stellar contract bindings typescript --wasm ...`) — never hand-edit it;
-regenerate it whenever the contract's public signatures/types change.
+regenerate it whenever the contract's public signatures/types change. CI now
+enforces that: `.github/workflows/ci.yml`'s `sdk-bindings` job rebuilds the
+WASM, regenerates with the CLI version pinned in `scripts/stellar-cli-version`,
+and diffs the result (`scripts/check-generated-bindings.sh`, issue #121). See
+`sdk/src/generated/README.md` for the regeneration steps.
 `sdk/src/index.ts` is the actual public surface (hand-written, ergonomic
 wrapper) — consumers import from the package root, never from
-`src/generated/` directly.
-
-On the pause custodian: it is the one contract-level role in the design,
-and it is deliberately weaker than the contract-level admin ADR 0002
-rejected — it cannot release, refund, edit an escrow, rotate a releaser,
-or upgrade anything, so its worst case is "no new escrows here" (threat
-model T11), never "someone's money is stuck". For mainnet, pass a Stellar
-multisig account (e.g. 2-of-3) as `pause_admin`; `require_auth` honours
-that account's own thresholds, so no contract change is needed. Because
-the constructor is the only place the address is set, changing custodians
-means deploying a new contract id.
-
-`condition_ref` is an **opaque string/id** the contract does not interpret
-— it's the caller's job (e.g. `docforum-core`) to decide when release is
-warranted and call `release()`. `releaser` is the one address permitted
+`src/generated/` directly.`condition_ref` is an **opaque string/id** the contract does not interpret, bounded to 64 bytes at creation (error `ConditionRefTooLong = 7`; SDK constant `MAX_CONDITION_REF_LENGTH`) — it's the caller's job (e.g. `docforum-core`) to decide when release is warranted and call `release()`. `releaser` is the one address permitted
 to call `release`/`refund` for that specific escrow, set once at
 `create_escrow` time — see `docs/adr/0002` for why a per-escrow releaser
 was chosen over a single contract-level admin. The one exception is the
@@ -113,6 +187,58 @@ way. Baking healthcare-specific logic into the contract is exactly the
 scope creep this repo exists to avoid (see README "why this repo exists,
 honestly").
 
+### Signer interface and browser wallets (issue #127)
+
+`EscrowClient` methods accept either a local `Keypair` or a SEP-43 `Signer`
+(`address` + `signTransaction`), so the same `createEscrow`/`release`/`refund`
+surface works in Node and in a browser wallet. `sdk/src/signers/wallets-kit.ts`
+ships `WalletsKitSigner`, which adapts Stellar Wallets Kit to that interface:
+
+- It is exported on the `@docforum/escrow-sdk/signers/wallets-kit` subpath and
+  has **no runtime import** of `@creit.tech/stellar-wallets-kit` (optional peer
+  dependency, injected kit). Server imports of the package root therefore never
+  pull wallet code; `sideEffects: false` keeps it tree-shakeable.
+- A wallet on the wrong network throws `WalletNetworkMismatchError` **before**
+  signing.
+- A user rejection is a normal SEP-43 outcome (`error.code === -4`), not an
+  unhandled throw.
+- 12 offline tests in `sdk/tests/signers.test.ts` with a fake kit.
+
+### React hooks (issue #126)
+
+`packages/escrow-react` (`@docforum/escrow-react`) is framework glue only: no
+UI components or styling. It depends on TanStack Query v5 as a peer and
+requires `EscrowProvider` (client) inside the app's `QueryClientProvider`.
+
+- `useEscrow(id)` polls `getEscrow` and stops at terminal statuses
+  (`Released`/`Refunded`).
+- `useEscrowActions(signer)` wraps creation/settlement, invalidates the
+  matching query, and returns user rejection as `{ status: "rejected" }`.
+- `useEscrowTimeline(escrow)` counts down to `refundAfter`. Documented caveat:
+  `refund_after` is a ledger timestamp, so a local countdown is advisory;
+  pass `ledgerTimeOffsetMs` to align it. The contract, not the countdown,
+  authorizes a timeout refund.
+
+### Telemetry (issue #129)
+
+`EscrowClientConfig.instrumentation` / `onEvent` add optional tracing for the
+`simulate`, `sign`, `submit` and `confirm` phases. `@opentelemetry/api` is an
+optional peer dependency; with no tracer and no `onEvent` the helpers return
+before reading a clock or allocating a span. Attributes are contract id,
+function, escrow id, transaction hash and retry count. Account addresses are
+never included unless `includeAddresses: true` (threat model T9). Tests in
+`sdk/tests/instrumentation.test.ts` assert every phase is produced and the
+disabled path does no timing work.
+
+### Go client (issue #128)
+
+`sdk-go/` is a separate Go module (`github.com/DocForum/docforum-escrow/sdk-go`)
+with `CreateEscrow`, `GetStatus`, `GetEscrow`, `Release` and `Refund`, typed
+errors matching the contract's codes, and `big.Int` for i128 amounts. It is an
+additive client — the contract and TypeScript SDK are unchanged by it. Offline
+unit tests run in CI; integration tests are opt-in and run against a local
+quickstart deployment.
+
 ## Hard rules
 1. **No PHI, ever, anywhere in this repo.** Not in tests, not in example
    fixtures, not in comments. This repo should be safely public and
@@ -122,10 +248,7 @@ honestly").
    "fix in a follow-up" territory.
 3. SDK version bumps that change the public API are breaking changes —
    semver strictly, since `docforum-core` pins a version rather than
-   tracking latest. This repo's 0.x convention: a new (non-breaking)
-   feature bumps the minor (`0.3.0 → 0.4.0` for the Phase E5 pause
-   methods) and a breaking change bumps the minor too (`0.2.0 → 0.3.0`
-   for `refund_after`).
+   tracking latest.
 4. Testnet only until a security review has happened. Do not wire mainnet
    contract addresses into the SDK's defaults.
 

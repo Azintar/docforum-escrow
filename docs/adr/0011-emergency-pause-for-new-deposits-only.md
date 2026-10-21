@@ -1,4 +1,4 @@
-# ADR 0005: Emergency pause — one custodian address, blocks new deposits only
+# ADR 0011: Emergency pause — one custodian address, blocks new deposits only
 
 Status: Accepted (2026-10-20)
 
@@ -45,10 +45,12 @@ nothing else. Constraints any decision here has to respect:
 
 ### 1. Custodian address set at deploy, may pause and unpause — **chosen**
 
-`__constructor(pause_admin: Address)` stores one address at deployment.
-`pause(caller)` and `unpause(caller)` require `caller.require_auth()` and
-`caller == pause_admin`; `create_escrow` returns `Paused` while the flag is
-set. Nothing else reads the flag.
+`__constructor(allowed_tokens, pause_admin)` stores one address at
+deployment (the token allowlist keeps its existing position, and the
+custodian is appended after it). `pause(caller)` and `unpause(caller)`
+require `caller.require_auth()` and `caller == pause_admin`; every deposit
+entry point returns `Paused` while the flag is set. Nothing else reads the
+flag.
 
 - The role is real but bounded: it can only make `create_escrow` fail.
   It cannot release, refund, rotate a `releaser`, change stored escrow
@@ -88,7 +90,7 @@ a malicious custodian can only deny new business briefly.
 - It also does not remove the powers that matter: the custodian could
   still re-pause from a bot, and the thing it protects (new deposits) was
   never the funds-at-risk surface. Rejected as complexity without a real
-  safety gain — the residual risk is documented under T11 instead.
+  safety gain — the residual risk is documented under T12 instead.
 
 ### 4. Token allowlist / deploy-time limits only
 
@@ -109,10 +111,11 @@ worth the extra trusted address. Rejected.
 Option 1.
 
 1. **Deploy-time configuration via a constructor.**
-   `__constructor(env: Env, pause_admin: Address)` stores the custodian in
-   instance storage (`DataKey::PauseAdmin`) and leaves the pause flag
-   unset (= not paused). No auth is required in the constructor: it runs as
-   part of deployment, before any caller exists, and the address is
+   `__constructor(env: Env, allowed_tokens: Vec<Address>, pause_admin:
+   Address)` stores the custodian in instance storage (`DataKey::PauseAdmin`)
+   and leaves the pause flag unset (= not paused); the token allowlist keeps
+   its original first position. No auth is required in the constructor: it
+   runs as part of deployment, before any caller exists, and the address is
    immutable afterwards (no setter).
 2. **Pause/unpause by the custodian only.**
    `pause(caller)` / `unpause(caller)` call `caller.require_auth()` and
@@ -120,12 +123,12 @@ Option 1.
    otherwise. They are *not* idempotent: pausing an already-paused contract
    returns `AlreadyPaused`, unpausing a running one returns `NotPaused`, so
    an event never claims a transition that didn't happen.
-3. **Scope: new deposits only.** `create_escrow` checks the flag first and
-   returns the new `Error::Paused` (7) without pulling funds, without
-   consuming an escrow id, and without writing an escrow. This contract has
-   no `top_up` — `create_escrow` is the only deposit path. **If a top-up
-   path is ever added, it must be gated by the same check**, and the
-   "paused blocks every deposit path" test must be extended in the same PR.
+3. **Scope: new deposits only.** Every creation entry point funnels through
+   `create_escrow_inner`, which checks the flag first and returns the new
+   `Error::Paused` (26) without pulling funds, without consuming an escrow
+   id, and without writing an escrow. `top_up` — a deposit path added after
+   this ADR was first written — applies the same check before its transfer,
+   exactly as the ADR originally required of any future deposit path.
    `release`, `refund` (both the releaser path and the ADR 0004 timeout
    path), `get_status`, `get_escrow` and `is_paused` never read the flag.
 4. **How to unpause.** The same custodian calls `unpause`. No timelock on
@@ -136,9 +139,9 @@ Option 1.
    option 3) and no second role.
 5. **Observability.** `pause` and `unpause` emit `Paused` / `Unpaused`
    contract events carrying the custodian address, so integrators and
-   monitoring can detect the transition without polling. This is the first
-   event this contract emits; create/release/refund events are still
-   tracked separately (threat model T7, issue #9).
+   monitoring can detect the transition without polling. The lifecycle
+   `ESCROW` snapshot events are separate and unmodified by the pause
+   (threat model T7).
 6. **Read path.** `is_paused()` (bool) and `get_pause_admin()`
    (`Option<Address>`) are read-only, so an integrator can check state
    before building a transaction and can verify who the custodian is
@@ -159,10 +162,11 @@ the deadline.
 
 ## Consequences
 
-- **`create_escrow`'s signature is unchanged**, but the contract gains a
-  constructor, so **deployment changes**: every deployment now must supply
-  `pause_admin`. The existing testnet deployment predates it and is kept as
-  history in `docs/testnet-deployments.md`; a redeploy is needed for the
+- **The deposit entry points' signatures are unchanged**, but the
+  contract's constructor gains a `pause_admin` argument, so **deployment
+  changes**: every deployment must now supply both `allowed_tokens` and
+  `pause_admin`. The existing testnet deployments predate it and are kept
+  as history in `docs/testnet-deployments.md`; a redeploy is needed for the
   pause to exist on-chain at all. There is no constructor-less deploy path
   and no way to add a custodian to an already-deployed instance (the WASM
   is immutable) — that is deliberate: no post-hoc admin can appear.
@@ -170,24 +174,24 @@ the deadline.
   keys (`PauseAdmin`, `Paused`) are added. Existing escrow entries are
   unaffected — and there is no migration to worry about, because a
   redeploy is a new contract id by definition.
-- **New error codes**: `Paused = 7`, `AlreadyPaused = 8`, `NotPaused = 9`.
-  Existing codes 1–6 keep their numbers (5 and 6 are already live on
-  testnet), because consumers map codes, not names.
+- **New error codes**: `Paused = 26`, `AlreadyPaused = 27`, `NotPaused = 28`.
+  Every existing code keeps its number, because consumers map codes, not
+  names. 26–28 are reserved here even though the protocol-fee ADR takes 25,
+  so the two changes can land in either order without colliding.
 - **New public functions**: `pause`, `unpause`, `is_paused`,
   `get_pause_admin`, plus the constructor. Additive but a real surface
-  change: SDK bindings must be regenerated and the SDK bumped (hard rule 3
-  — `0.3.0 → 0.4.0`, a feature bump in 0.x), with `pause`/`unpause`/
-  `isPaused`/`getPauseAdmin` wrapped for operators.
-- **Trust model grows by one address** (threat model §2, new T11). It is
+  change: SDK bindings must be regenerated and the SDK minor-bumped by
+  changeset (hard rule 3 — `0.6.0 → 0.7.0` on release), with
+  `pause`/`unpause`/`isPaused`/`getPauseAdmin` wrapped for operators.
+- **Trust model grows by one address** (threat model §2, new T12). It is
   the first contract-level role in this design; the ADR's justification is
   that its only power is to refuse new deposits. A consumer that cannot
   accept even that should not use this contract id — and payees should know
   that a pause does not change the terms of an existing escrow.
-- **Coordination**: if the token allowlist issue also adds a constructor,
-  the two must be merged into one (e.g. `__constructor(pause_admin,
-  allowed_tokens)`), not stacked — a contract has exactly one
-  `__constructor`. This ADR's constructor takes only `pause_admin` because
-  the allowlist decision is not made in this change.
+- **Coordination**: a contract has exactly one `__constructor`, so the
+  token allowlist that landed separately is merged into the same one
+  (`__constructor(allowed_tokens, pause_admin)`) rather than stacked. Any
+  future deploy-time setting belongs there too.
 - **Not solved here**: pausing does not help if a bug affects outbound
   paths, and it does not stop losses already in flight. It limits *new*
   exposure; the Phase E4 review and T5/T6 mitigations are still the things

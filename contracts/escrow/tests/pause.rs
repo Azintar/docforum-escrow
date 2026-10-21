@@ -1,22 +1,25 @@
 // Phase E5 tests — the emergency pause that can only stop NEW escrows
-// (issue #35, docs/adr/0005). Per AGENTS.md hard rule 2: contract logic
+// (issue #35, docs/adr/0011). Per AGENTS.md hard rule 2: contract logic
 // changes need tests here before merge, not a follow-up.
 //
 // The review criterion for this feature is a negative one: **every**
 // outbound-funds path must be provably unaffected by the pause. So this
 // file tests both halves:
-//   - paused does block `create_escrow`, and locks nothing while doing so;
+//   - paused blocks every deposit path (`create_escrow`, its variants and
+//     `top_up`) and locks nothing while doing so;
 //   - paused does NOT block `release`, `refund`, or the ADR 0004 timeout
 //     refund — including release after the deadline and a long pause.
 // plus the role itself (custodian set at deploy, its auth, events, and
 // pause/unpause state errors).
 
-use docforum_escrow::{Error, EscrowContract, EscrowContractClient, EscrowStatus, Paused, Unpaused};
+use docforum_escrow::{
+    Error, EscrowContract, EscrowContractClient, EscrowStatus, Paused, Unpaused,
+};
 use soroban_sdk::{
     events::Event as _,
     testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    Address, Env, IntoVal, InvokeError, String,
+    Address, Env, IntoVal, InvokeError, String, Vec,
 };
 
 /// Ledger close time at escrow creation.
@@ -54,10 +57,22 @@ fn deploy<'a>(env: &'a Env) -> Fixture<'a> {
     let releaser = Address::generate(env);
     asset.mint(&payer, &1_000);
 
-    let contract_id = env.register(EscrowContract, (custodian.clone(),));
+    let contract_id = env.register(
+        EscrowContract,
+        (Vec::<Address>::new(env), custodian.clone()),
+    );
     let client = EscrowContractClient::new(env, &contract_id);
 
-    Fixture { client, token, token_id, contract_id, custodian, payer, payee, releaser }
+    Fixture {
+        client,
+        token,
+        token_id,
+        contract_id,
+        custodian,
+        payer,
+        payee,
+        releaser,
+    }
 }
 
 /// Creates one escrow of `amount` from the fixture's payer/payee/releaser.
@@ -70,6 +85,8 @@ fn create(env: &Env, f: &Fixture, amount: i128, refund_after: Option<u64>) -> u6
         &String::from_str(env, "opaque-condition-ref"),
         &f.releaser,
         &refund_after,
+        &false,
+        &None,
     )
 }
 
@@ -108,11 +125,14 @@ fn pause_blocks_new_deposits_and_emits_an_event() {
     f.client.pause(&f.custodian);
 
     // The event carries the custodian that flipped the flag, so monitoring
-    // can react without polling (docs/adr/0005, threat model T7). Read it
+    // can react without polling (docs/adr/0011, threat model T7). Read it
     // first: `env.events().all()` only covers the *last* invocation, and
     // `is_paused` below would replace it.
     let emitted = env.events().all().filter_by_contract(&f.contract_id);
-    let expected = Paused { admin: f.custodian.clone() }.to_xdr(&env, &f.contract_id);
+    let expected = Paused {
+        admin: f.custodian.clone(),
+    }
+    .to_xdr(&env, &f.contract_id);
     assert_eq!(emitted.events(), &[expected]);
 
     assert!(f.client.is_paused());
@@ -130,7 +150,10 @@ fn unpause_reopens_deposits_and_emits_an_event() {
     // Read the event before anything else invokes the contract
     // (`env.events().all()` covers only the last invocation).
     let emitted = env.events().all().filter_by_contract(&f.contract_id);
-    let expected = Unpaused { admin: f.custodian.clone() }.to_xdr(&env, &f.contract_id);
+    let expected = Unpaused {
+        admin: f.custodian.clone(),
+    }
+    .to_xdr(&env, &f.contract_id);
     assert_eq!(emitted.events(), &[expected]);
 
     assert!(!f.client.is_paused());
@@ -196,7 +219,7 @@ fn pause_requires_the_custodian_s_own_signature() {
 
     // Only the payer's auth is mocked from here on, so a call *by* the
     // custodian is unsigned and `require_auth` must reject it — the check
-    // is more than comparing addresses (docs/adr/0005).
+    // is more than comparing addresses (docs/adr/0011).
     env.mock_auths(&[MockAuth {
         address: &f.payer,
         invoke: &MockAuthInvoke {
@@ -211,7 +234,7 @@ fn pause_requires_the_custodian_s_own_signature() {
     assert!(!f.client.is_paused());
 }
 
-// --- paused blocks the only deposit path, and touches nothing ---
+// --- paused blocks every deposit path, and touches nothing ---
 
 #[test]
 fn paused_create_escrow_fails_with_paused_and_locks_no_funds() {
@@ -229,6 +252,8 @@ fn paused_create_escrow_fails_with_paused_and_locks_no_funds() {
             &String::from_str(&env, "blocked-ref"),
             &f.releaser,
             &None,
+            &false,
+            &None,
         ),
         Error::Paused,
     );
@@ -238,6 +263,58 @@ fn paused_create_escrow_fails_with_paused_and_locks_no_funds() {
     assert_eq!(f.token.balance(&f.payer), 1_000);
     assert_eq!(f.token.balance(&f.contract_id), 0);
     assert!(f.client.try_get_status(&0).is_err());
+}
+
+#[test]
+fn paused_blocks_the_other_creation_entry_points_and_top_up() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let escrow_id = create(&env, &f, 100, None);
+    f.client.pause(&f.custodian);
+
+    // The M-of-N and acceptance entry points funnel through the same
+    // creation path, so they are paused too (docs/adr/0011).
+    let mut releasers = Vec::new(&env);
+    releasers.push_back(f.releaser.clone());
+    assert_contract_error(
+        f.client.try_create_escrow_with_releasers(
+            &f.payer,
+            &f.payee,
+            &f.token_id,
+            &100,
+            &String::from_str(&env, "blocked-quorum"),
+            &releasers,
+            &1,
+            &None,
+            &false,
+            &None,
+        ),
+        Error::Paused,
+    );
+    assert_contract_error(
+        f.client.try_create_escrow_with_acceptance(
+            &f.payer,
+            &f.payee,
+            &f.token_id,
+            &100,
+            &String::from_str(&env, "blocked-acceptance"),
+            &f.releaser,
+            &None,
+            &true,
+            &None,
+        ),
+        Error::Paused,
+    );
+
+    // `top_up` is a deposit path as well: blocked before it transfers.
+    assert_contract_error(
+        f.client.try_top_up(&escrow_id, &f.payer, &100),
+        Error::Paused,
+    );
+
+    assert_eq!(f.token.balance(&f.payer), 900);
+    assert_eq!(f.token.balance(&f.contract_id), 100);
 }
 
 #[test]
@@ -258,6 +335,8 @@ fn paused_rejections_do_not_consume_escrow_ids() {
                 &100,
                 &String::from_str(&env, "blocked-ref"),
                 &f.releaser,
+                &None,
+                &false,
                 &None,
             )
             .is_err());
@@ -372,7 +451,8 @@ fn paused_does_not_change_stored_escrow_data_or_reads() {
     assert_eq!(before.token, after.token);
     assert_eq!(before.amount, after.amount);
     assert_eq!(before.condition_ref, after.condition_ref);
-    assert_eq!(before.releaser, after.releaser);
+    assert_eq!(before.releasers, after.releasers);
+    assert_eq!(before.threshold, after.threshold);
     assert_eq!(before.refund_after, after.refund_after);
     assert_eq!(after.status, EscrowStatus::Funded);
     assert_eq!(f.client.get_status(&escrow_id), EscrowStatus::Funded);
@@ -389,8 +469,14 @@ fn a_settled_escrow_cannot_be_paid_twice_just_because_the_contract_is_paused() {
     f.client.pause(&f.custodian);
 
     // Status rules are unchanged by the pause: still exactly one payout.
-    assert_contract_error(f.client.try_release(&escrow_id, &f.releaser), Error::NotFunded);
-    assert_contract_error(f.client.try_refund(&escrow_id, &f.releaser), Error::NotFunded);
+    assert_contract_error(
+        f.client.try_release(&escrow_id, &f.releaser),
+        Error::NotFunded,
+    );
+    assert_contract_error(
+        f.client.try_refund(&escrow_id, &f.releaser),
+        Error::NotFunded,
+    );
     assert_eq!(f.token.balance(&f.payee), 300);
     assert_eq!(f.token.balance(&f.contract_id), 0);
 }

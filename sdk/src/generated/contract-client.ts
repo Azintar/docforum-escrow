@@ -1,11 +1,3 @@
-// GENERATED — do not hand-edit. Produced by:
-//   stellar contract bindings typescript \
-//     --wasm contracts/escrow/target/wasm32v1-none/release/docforum_escrow.wasm \
-//     --output-dir <tmp-dir> --overwrite
-// then this one file (src/index.ts in the generator's output) copied here.
-// Regenerate whenever contracts/escrow/src/lib.rs's public function
-// signatures, types, or doc comments change — the contract spec (and the
-// doc comments you see below) come directly from the compiled wasm, not
 import { Buffer } from "buffer";
 import { Address } from "@stellar/stellar-sdk";
 import {
@@ -59,43 +51,139 @@ export const Errors = {
    */
   6: {message:"BalanceMismatch"},
   /**
-   * New deposits are blocked: the contract is paused (docs/adr/0005).
-   * Only `create_escrow` ever returns this — every outbound path
-   * (`release`, `refund`, timeout refund) is unaffected by the pause.
+   * `condition_ref` exceeded the maximum allowed length (currently
+   * 64 bytes) — see docs/threat-model.md T10 and ROADMAP.md Phase E5.
+   * Bounded to keep storage and event costs predictable; reject at
+   * creation so no on-chain storage is wasted on an oversized ref.
    */
-  7: {message:"Paused"},
+  7: {message:"ConditionRefTooLong"},
+  /**
+   * `token` is not in the immutable deploy-time allowlist.
+   */
+  8: {message:"DisallowedToken"},
+  /**
+   * The opted-in payee callback returned an error or could not be
+   * invoked. The release transaction (including its transfer) rolls back.
+   */
+  9: {message:"CallbackFailed"},
+  12: {message:"Overflow"},
+  /**
+   * The releaser set is empty, or `threshold` is 0 or larger than the
+   * number of releasers — see docs/adr/0007.
+   */
+  13: {message:"InvalidThreshold"},
+  /**
+   * More than `MAX_RELEASERS` (10) addresses were supplied at creation.
+   */
+  14: {message:"TooManyReleasers"},
+  /**
+   * Fewer distinct approvals were supplied than the escrow's threshold,
+   * or a single releaser tried to settle a quorum escrow through the
+   * single-caller entry point.
+   */
+  15: {message:"ThresholdNotMet"},
+  /**
+   * The same address appeared twice in one approval list. Duplicates
+   * never count twice toward the threshold.
+   */
+  16: {message:"DuplicateApprover"},
+  /**
+   * The same address appeared twice in the releaser set at creation.
+   */
+  17: {message:"DuplicateReleaser"},
+  18: {message:"AcceptanceRequired"},
+  19: {message:"AcceptanceNotConfigured"},
+  20: {message:"AlreadyAccepted"},
+  /**
+   * The new releaser cannot be the escrow contract or payee.
+   */
+  24: {message:"InvalidReleaser"},
+  /**
+   * `refund_to` was the escrow contract's own address — funds sent
+   * there on refund could never be moved again (docs/adr/0009).
+   */
+  21: {message:"InvalidRefundTo"},
+  /**
+   * The configured release time is in the past or after the refund time.
+   */
+  22: {message:"InvalidReleaseNotBefore"},
+  /**
+   * Release was attempted before the configured time.
+   */
+  23: {message:"ReleaseTooEarly"},
+  /**
+   * New deposits are blocked: the contract is paused (docs/adr/0011).
+   * Only deposit paths return this — every outbound path (`release`,
+   * `refund`, timeout refund) is unaffected by the pause.
+   */
+  26: {message:"Paused"},
   /**
    * `pause` called while the contract is already paused — a no-op is
    * rejected rather than emitting an event for a transition that
-   * didn't happen (docs/adr/0005).
+   * didn't happen (docs/adr/0011).
    */
-  8: {message:"AlreadyPaused"},
+  27: {message:"AlreadyPaused"},
   /**
-   * `unpause` called while the contract is not paused (docs/adr/0005).
+   * `unpause` called while the contract is not paused (docs/adr/0011).
    */
-  9: {message:"NotPaused"}
+  28: {message:"NotPaused"}
 }
 
 
 
 
 export interface EscrowData {
+  /**
+ * Ledger timestamp at which the payee accepted, if any.
+ */
+accepted_at: Option<u64>;
   amount: i128;
   condition_ref: string;
+  /**
+ * If true, invoke the contract payee's `on_escrow_released` hook after
+ * the payout transfer. A failed callback reverts the whole release.
+ */
+notify_payee: boolean;
   payee: string;
-  payer: string;
+  /**
+ * The funder: authorises and pays for the escrow at creation. Also
+ * the refund destination unless `refund_to` says otherwise.
+ */
+payer: string;
   /**
  * Optional deadline (unix seconds) after which `refund` opens to
- * anyone — still only back to `payer`. `None` means no timeout,
+ * anyone — still only to `refund_to`. `None` means no timeout,
  * behaviour identical to before this field existed — see docs/adr/0004.
  */
 refund_after: Option<u64>;
   /**
- * The only address permitted to call `release`/`refund` on this
- * escrow. Set once at `create_escrow` time — see docs/adr/0002.
+ * Where **every** refund path (releaser, timeout) sends the funds.
+ * Fixed at creation under the funder's auth and never chosen at
+ * payout, so invariant I1 holds; defaults to `payer` when omitted at
+ * creation — see docs/adr/0009.
  */
-releaser: string;
+refund_to: string;
+  /**
+ * Earliest ledger timestamp at which release is allowed.
+ */
+release_not_before: Option<u64>;
+  /**
+ * Addresses permitted to settle this escrow — see docs/adr/0002 for the
+ * per-escrow releaser, and docs/adr/0007 for M-of-N sets. A plain
+ * single-releaser escrow stores exactly one entry here.
+ */
+releasers: Array<string>;
+  /**
+ * Whether release requires the payee's explicit acceptance.
+ */
+requires_acceptance: boolean;
   status: EscrowStatus;
+  /**
+ * How many *distinct* addresses from `releasers` must authorize one
+ * settlement. Always `>= 1` and `<= releasers.len()`; `1` means any
+ * single releaser can settle (the pre-quorum behaviour).
+ */
+threshold: u32;
   token: string;
 }
 
@@ -104,10 +192,10 @@ export type EscrowStatus = {tag: "Funded", values: void} | {tag: "Released", val
 export interface Client {
   /**
    * Construct and simulate a pause transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Blocks new deposits (`create_escrow`) until `unpause` is called.
-   * Callable only by the custodian set at deployment, which must sign
-   * this call (docs/adr/0005). Emits a `Paused` event carrying that
-   * address.
+   * Blocks new deposits (`create_escrow` and its variants, plus
+   * `top_up`) until `unpause` is called. Callable only by the custodian
+   * set at deployment, which must sign this call (docs/adr/0011). Emits
+   * a `Paused` event carrying that address.
    * 
    * Deliberately has no effect on money already escrowed: `release`,
    * `refund` and the timeout refund do not read the flag, so a pause can
@@ -117,38 +205,54 @@ export interface Client {
   pause: ({caller}: {caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a accept transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Records the payee's acceptance for an opted-in funded escrow.
+   */
+  accept: ({escrow_id, payee}: {escrow_id: u64, payee: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a refund transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Returns the escrowed `amount` to `payer`. Same state rule as
+   * Returns the escrowed `amount` to the escrow's `refund_to` (the
+   * `payer` unless a different destination was fixed at creation —
+   * docs/adr/0006). Same state rule as
    * `release` (only while `Funded`), but two callers are authorised:
    * 
-   * - the escrow's `releaser` (docs/adr/0002), always; or
+   * - the escrow's releaser (docs/adr/0002), always; or
    * - **anyone**, once `refund_after` has been reached — the timeout
-   * refund path for a lost/unsignable `releaser` key (docs/adr/0004).
+   * refund path for a lost/unsignable releaser key (docs/adr/0004).
    * 
    * The destination never changes: timeout or not, funds only ever go
-   * back to the stored `payer`. With no `refund_after` set, behaviour
-   * is identical to before the timeout existed — releaser only.
+   * to the stored `refund_to`, which no caller can influence. With no
+   * `refund_after` set, behaviour is identical to before the timeout
+   * existed — releaser only. On an M-of-N escrow the releaser path needs
+   * a threshold of 1; otherwise use `refund_with_approvals` (the timeout
+   * path stays open to anyone).
    * 
-   * Deliberately **not** gated by the emergency pause (docs/adr/0005):
+   * Deliberately **not** gated by the emergency pause (docs/adr/0011):
    * pausing new deposits must never trap funds already escrowed.
    */
   refund: ({escrow_id, caller}: {escrow_id: u64, caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a top_up transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Adds funds to a funded escrow without changing its parties or id.
+   * Only its original payer may authorize the transfer.
+   */
+  top_up: ({escrow_id, payer, amount}: {escrow_id: u64, payer: string, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a release transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Moves the escrowed `amount` to `payee`. Only the escrow's
-   * `releaser` (set at `create_escrow` time) may call this — the
-   * contract enforces WHO, never WHY (ADR 0001). Errors if the
-   * escrow doesn't exist, `caller` isn't the releaser, or the escrow
-   * isn't currently `Funded` (no double-release, no releasing a
-   * refunded escrow).
+   * Moves the escrowed `amount` to `payee`. Only the escrow's releaser
+   * may call this — the contract enforces WHO, never WHY (ADR 0001). On
+   * an M-of-N escrow this single-caller path is only allowed when the
+   * threshold is 1; otherwise use `release_with_approvals`.
    * 
    * Deliberately **not** gated by `refund_after` (docs/adr/0004): after
    * the deadline the releaser can still release, racing any timeout
    * refund — whoever lands first wins and the other fails `NotFunded`.
    * 
    * Also deliberately **not** gated by the emergency pause
-   * (docs/adr/0005): funds must always be able to leave an existing
+   * (docs/adr/0011): funds must always be able to leave an existing
    * escrow, whatever state new deposits are in.
    */
   release: ({escrow_id, caller}: {escrow_id: u64, caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
@@ -159,7 +263,7 @@ export interface Client {
    * set at deployment. Emits an `Unpaused` event. Errors `NotPaused` if
    * the contract isn't paused.
    * 
-   * Unpausing is not timelocked on purpose (docs/adr/0005): it restores
+   * Unpausing is not timelocked on purpose (docs/adr/0011): it restores
    * normal operation and cannot touch a single escrow, so delaying it
    * would only delay recovery.
    */
@@ -169,17 +273,18 @@ export interface Client {
    * Construct and simulate a is_paused transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Read-only: is the emergency pause currently blocking new deposits?
    * Says nothing about existing escrows — `release`/`refund` work either
-   * way (docs/adr/0005).
+   * way (docs/adr/0011).
    */
   is_paused: (options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
 
   /**
    * Construct and simulate a get_escrow transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Read-only accessor for everything stored about `escrow_id` —
-   * payer, payee, token, amount, `condition_ref`, status, `releaser`
-   * and `refund_after`. Exists so payees and integrators can check
-   * the deadline before relying on a `Funded` escrow (docs/adr/0004,
-   * threat model T8). Errors on an unknown id.
+   * Read-only accessor for everything stored about `escrow_id` — payer,
+   * payee, token, amount, `condition_ref`, status, the releaser set with
+   * its threshold, `refund_after` and `refund_to`. Exists so payees and
+   * integrators can check who can settle, when, and where a refund goes
+   * before relying on a `Funded` escrow (docs/adr/0004, threat model T8).
+   * Errors on an unknown id.
    */
   get_escrow: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<EscrowData>>>
 
@@ -192,35 +297,96 @@ export interface Client {
   /**
    * Construct and simulate a create_escrow transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Locks `amount` of `token` pulled from `payer`, held for `payee`,
-   * tagged with an opaque `condition_ref`. `releaser` is the only
-   * address that will later be permitted to call `release`/`refund`
-   * on this escrow (see docs/adr/0002). `refund_after` is an optional
-   * unix timestamp after which `refund` opens to any caller, always
-   * back to `payer` (docs/adr/0004); `None` means no timeout.
-   * Requires `payer` auth (the contract moves their funds). Returns
-   * the new escrow's id.
+   * docs/threat-model.md T10 and ROADMAP.md Phase E5). `releaser` is the
+   * address permitted to call `release`/`refund` on this escrow
+   * (docs/adr/0002). `refund_after` is optional (docs/adr/0004).
+   * `notify_payee` opts an implementing contract payee into
+   * `on_escrow_released(escrow_id, amount)` (docs/adr/0005). The payer
+   * must authorize creation, and the payee must also authorize if
+   * `notify_payee` is true. `refund_to` is the optional refund
+   * destination for a sponsored escrow where the funder (`payer`) is
+   * not who should get the money back (docs/adr/0009): `None` means
+   * `payer`; it may not be this contract's own address, and the
+   * `payer`'s auth on this call covers it. For M-of-N releasers use
+   * `create_escrow_with_releasers`.
    * 
-   * This is the contract's only deposit path, and the only function the
-   * emergency pause gates (docs/adr/0005): while paused it fails with
-   * `Paused` before any funds move, no escrow id is consumed and nothing
-   * is stored. Any future deposit path must apply the same check.
+   * This is a deposit path, so it is gated by the emergency pause
+   * (docs/adr/0011): while paused it fails with `Paused` before any
+   * funds move, no escrow id is consumed and nothing is stored. The
+   * same check covers every creation entry point, and
    */
-  create_escrow: ({payer, payee, token, amount, condition_ref, releaser, refund_after}: {payer: string, payee: string, token: string, amount: i128, condition_ref: string, releaser: string, refund_after: Option<u64>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  create_escrow: ({payer, payee, token, amount, condition_ref, releaser, refund_after, notify_payee, refund_to}: {payer: string, payee: string, token: string, amount: i128, condition_ref: string, releaser: string, refund_after: Option<u64>, notify_payee: boolean, refund_to: Option<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
    * Construct and simulate a get_pause_admin transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Read-only: the custodian address that may `pause`/`unpause`, so
    * integrators can verify who holds the role without trusting docs
-   * (docs/adr/0005). `None` only for an instance deployed without a
+   * (docs/adr/0011). `None` only for an instance deployed without a
    * constructor, which this contract's WASM does not allow.
    */
   get_pause_admin: (options?: MethodOptions) => Promise<AssembledTransaction<Option<string>>>
+
+  /**
+   * Construct and simulate a rotate_releaser transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Rotates a funded escrow's releaser. Both the current releaser and
+   * payer must authorize the change; the payer's consent prevents a
+   * compromised releaser from silently appointing an attacker. The
+   * replacement cannot be the contract itself or the payee.
+   */
+  rotate_releaser: ({escrow_id, caller, new_releaser}: {escrow_id: u64, caller: string, new_releaser: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a refund_with_approvals transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Returns the escrowed `amount` to `refund_to` on behalf of an M-of-N
+   * releaser set (docs/adr/0007). Same approval rules as
+   * `release_with_approvals`. The timeout refund path in `refund` stays
+   * available as well: once `refund_after` passes, anyone can return the
+   * funds to the payer without approvals.
+   */
+  refund_with_approvals: ({escrow_id, approvers}: {escrow_id: u64, approvers: Array<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a release_with_approvals transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Moves the escrowed `amount` to `payee` on behalf of an M-of-N
+   * releaser set (docs/adr/0007). Every address in `approvers` must be a
+   * releaser, appear at most once, and authorize this exact invocation;
+   * at least `threshold` distinct approvers are required. Approvals are
+   * not stored between calls, so there is nothing to clear on settlement
+   * and no approval to replay — a settled escrow fails `NotFunded`.
+   */
+  release_with_approvals: ({escrow_id, approvers}: {escrow_id: u64, approvers: Array<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a create_escrow_release_time transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Creates a single-releaser escrow with an optional earliest release time.
+   * Release is allowed at the configured timestamp.
+   */
+  create_escrow_release_time: ({payer, payee, token, amount, condition_ref, releaser, refund_after, notify_payee, refund_to, release_not_before}: {payer: string, payee: string, token: string, amount: i128, condition_ref: string, releaser: string, refund_after: Option<u64>, notify_payee: boolean, refund_to: Option<string>, release_not_before: Option<u64>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a create_escrow_with_releasers transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Same as `create_escrow`, but the escrow is settled by M-of-N
+   * releasers instead of one address (docs/adr/0007): `threshold`
+   * distinct addresses from `releasers` must authorize a settlement.
+   * The set is stored at creation and cannot be changed afterwards —
+   * there is no admin and no setter. Rejects an empty set, more than
+   * 10 releasers, duplicate addresses, and a threshold of 0 or one
+   * larger than the set.
+   */
+  create_escrow_with_releasers: ({payer, payee, token, amount, condition_ref, releasers, threshold, refund_after, notify_payee, refund_to}: {payer: string, payee: string, token: string, amount: i128, condition_ref: string, releasers: Array<string>, threshold: u32, refund_after: Option<u64>, notify_payee: boolean, refund_to: Option<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a create_escrow_with_acceptance transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Creates an escrow with an opt-in payee acceptance gate. Existing
+   * integrations can keep using `create_escrow`, which defaults this off.
+   */
+  create_escrow_with_acceptance: ({payer, payee, token, amount, condition_ref, releaser, refund_after, requires_acceptance, refund_to}: {payer: string, payee: string, token: string, amount: i128, condition_ref: string, releaser: string, refund_after: Option<u64>, requires_acceptance: boolean, refund_to: Option<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
         /** Constructor/Initialization Args for the contract's `__constructor` method */
-        {pause_admin}: {pause_admin: string},
+        {allowed_tokens, pause_admin}: {allowed_tokens: Array<string>, pause_admin: string},
     /** Options for initializing a Client as well as for calling a method, with extras specific to deploying. */
     options: MethodOptions &
       Omit<ContractClientOptions, "contractId"> & {
@@ -232,37 +398,53 @@ export class Client extends ContractClient {
         format?: "hex" | "base64";
       }
   ): Promise<AssembledTransaction<T>> {
-    return ContractClient.deploy({pause_admin}, options)
+    return ContractClient.deploy({allowed_tokens, pause_admin}, options)
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACQAAAAAAAAAITm90Rm91bmQAAAABAAAAAAAAAA1JbnZhbGlkQW1vdW50AAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAAJTm90RnVuZGVkAAAAAAAABAAAALpgcmVmdW5kX2FmdGVyYCB3YXMgbm90IHN0cmljdGx5IGluIHRoZSBmdXR1cmUgYXQgY3JlYXRpb24g4oCUIHNlZQpkb2NzL2Fkci8wMDA0OiBhIGRlYWRsaW5lIHRoYXQgaGFzIGFscmVhZHkgcGFzc2VkIHdvdWxkIGxldAphbnlvbmUgcmVmdW5kIHRoZSBlc2Nyb3cgYmVmb3JlIHRoZSByZWxlYXNlciBjb3VsZCBldmVyIGFjdC4AAAAAABJJbnZhbGlkUmVmdW5kQWZ0ZXIAAAAAAAUAAACjVGhlIGNvbnRyYWN0J3MgdG9rZW4gYmFsYW5jZSBkaWRuJ3QgcmlzZSBieSBleGFjdGx5IGBhbW91bnRgCmFjcm9zcyBgY3JlYXRlX2VzY3Jvd2AncyB0cmFuc2ZlciAoYSBseWluZyBvciBzaG9ydC1kZWxpdmVyaW5nCnRva2VuKSDigJQgc2VlIGRvY3MvdGhyZWF0LW1vZGVsLm1kIFQ1LgAAAAAPQmFsYW5jZU1pc21hdGNoAAAAAAYAAADCTmV3IGRlcG9zaXRzIGFyZSBibG9ja2VkOiB0aGUgY29udHJhY3QgaXMgcGF1c2VkIChkb2NzL2Fkci8wMDA1KS4KT25seSBgY3JlYXRlX2VzY3Jvd2AgZXZlciByZXR1cm5zIHRoaXMg4oCUIGV2ZXJ5IG91dGJvdW5kIHBhdGgKKGByZWxlYXNlYCwgYHJlZnVuZGAsIHRpbWVvdXQgcmVmdW5kKSBpcyB1bmFmZmVjdGVkIGJ5IHRoZSBwYXVzZS4AAAAAAAZQYXVzZWQAAAAAAAcAAACeYHBhdXNlYCBjYWxsZWQgd2hpbGUgdGhlIGNvbnRyYWN0IGlzIGFscmVhZHkgcGF1c2VkIOKAlCBhIG5vLW9wIGlzCnJlamVjdGVkIHJhdGhlciB0aGFuIGVtaXR0aW5nIGFuIGV2ZW50IGZvciBhIHRyYW5zaXRpb24gdGhhdApkaWRuJ3QgaGFwcGVuIChkb2NzL2Fkci8wMDA1KS4AAAAAAA1BbHJlYWR5UGF1c2VkAAAAAAAACAAAAEJgdW5wYXVzZWAgY2FsbGVkIHdoaWxlIHRoZSBjb250cmFjdCBpcyBub3QgcGF1c2VkIChkb2NzL2Fkci8wMDA1KS4AAAAAAAlOb3RQYXVzZWQAAAAAAAAJ",
-        "AAAABQAAAIhFbWl0dGVkIGJ5IGBwYXVzZWAgKGRvY3MvYWRyLzAwMDUpLiBDYXJyaWVzIHRoZSBjdXN0b2RpYW4gdGhhdCBmbGlwcGVkCnRoZSBmbGFnIHNvIGludGVncmF0b3JzIGFuZCBtb25pdG9yaW5nIGNhbiByZWFjdCB3aXRob3V0IHBvbGxpbmcuAAAAAAAAAAZQYXVzZWQAAAAAAAEAAAAGcGF1c2VkAAAAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
-        "AAAABQAAACVFbWl0dGVkIGJ5IGB1bnBhdXNlYCAoZG9jcy9hZHIvMDAwNSkuAAAAAAAAAAAAAAhVbnBhdXNlZAAAAAEAAAAIdW5wYXVzZWQAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
-        "AAAAAQAAAAAAAAAAAAAACkVzY3Jvd0RhdGEAAAAAAAgAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANY29uZGl0aW9uX3JlZgAAAAAAABAAAAAAAAAABXBheWVlAAAAAAAAEwAAAAAAAAAFcGF5ZXIAAAAAAAATAAAAxk9wdGlvbmFsIGRlYWRsaW5lICh1bml4IHNlY29uZHMpIGFmdGVyIHdoaWNoIGByZWZ1bmRgIG9wZW5zIHRvCmFueW9uZSDigJQgc3RpbGwgb25seSBiYWNrIHRvIGBwYXllcmAuIGBOb25lYCBtZWFucyBubyB0aW1lb3V0LApiZWhhdmlvdXIgaWRlbnRpY2FsIHRvIGJlZm9yZSB0aGlzIGZpZWxkIGV4aXN0ZWQg4oCUIHNlZSBkb2NzL2Fkci8wMDA0LgAAAAAADHJlZnVuZF9hZnRlcgAAA+gAAAAGAAAAfVRoZSBvbmx5IGFkZHJlc3MgcGVybWl0dGVkIHRvIGNhbGwgYHJlbGVhc2VgL2ByZWZ1bmRgIG9uIHRoaXMKZXNjcm93LiBTZXQgb25jZSBhdCBgY3JlYXRlX2VzY3Jvd2AgdGltZSDigJQgc2VlIGRvY3MvYWRyLzAwMDIuAAAAAAAACHJlbGVhc2VyAAAAEwAAAAAAAAAGc3RhdHVzAAAAAAfQAAAADEVzY3Jvd1N0YXR1cwAAAAAAAAAFdG9rZW4AAAAAAAAT",
+      new ContractSpec([ "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAAGQAAAAAAAAAITm90Rm91bmQAAAABAAAAAAAAAA1JbnZhbGlkQW1vdW50AAAAAAAAAgAAAAAAAAAMVW5hdXRob3JpemVkAAAAAwAAAAAAAAAJTm90RnVuZGVkAAAAAAAABAAAALpgcmVmdW5kX2FmdGVyYCB3YXMgbm90IHN0cmljdGx5IGluIHRoZSBmdXR1cmUgYXQgY3JlYXRpb24g4oCUIHNlZQpkb2NzL2Fkci8wMDA0OiBhIGRlYWRsaW5lIHRoYXQgaGFzIGFscmVhZHkgcGFzc2VkIHdvdWxkIGxldAphbnlvbmUgcmVmdW5kIHRoZSBlc2Nyb3cgYmVmb3JlIHRoZSByZWxlYXNlciBjb3VsZCBldmVyIGFjdC4AAAAAABJJbnZhbGlkUmVmdW5kQWZ0ZXIAAAAAAAUAAACjVGhlIGNvbnRyYWN0J3MgdG9rZW4gYmFsYW5jZSBkaWRuJ3QgcmlzZSBieSBleGFjdGx5IGBhbW91bnRgCmFjcm9zcyBgY3JlYXRlX2VzY3Jvd2AncyB0cmFuc2ZlciAoYSBseWluZyBvciBzaG9ydC1kZWxpdmVyaW5nCnRva2VuKSDigJQgc2VlIGRvY3MvdGhyZWF0LW1vZGVsLm1kIFQ1LgAAAAAPQmFsYW5jZU1pc21hdGNoAAAAAAYAAAEAYGNvbmRpdGlvbl9yZWZgIGV4Y2VlZGVkIHRoZSBtYXhpbXVtIGFsbG93ZWQgbGVuZ3RoIChjdXJyZW50bHkKNjQgYnl0ZXMpIOKAlCBzZWUgZG9jcy90aHJlYXQtbW9kZWwubWQgVDEwIGFuZCBST0FETUFQLm1kIFBoYXNlIEU1LgpCb3VuZGVkIHRvIGtlZXAgc3RvcmFnZSBhbmQgZXZlbnQgY29zdHMgcHJlZGljdGFibGU7IHJlamVjdCBhdApjcmVhdGlvbiBzbyBubyBvbi1jaGFpbiBzdG9yYWdlIGlzIHdhc3RlZCBvbiBhbiBvdmVyc2l6ZWQgcmVmLgAAABNDb25kaXRpb25SZWZUb29Mb25nAAAAAAcAAAA2YHRva2VuYCBpcyBub3QgaW4gdGhlIGltbXV0YWJsZSBkZXBsb3ktdGltZSBhbGxvd2xpc3QuAAAAAAAPRGlzYWxsb3dlZFRva2VuAAAAAAgAAACDVGhlIG9wdGVkLWluIHBheWVlIGNhbGxiYWNrIHJldHVybmVkIGFuIGVycm9yIG9yIGNvdWxkIG5vdCBiZQppbnZva2VkLiBUaGUgcmVsZWFzZSB0cmFuc2FjdGlvbiAoaW5jbHVkaW5nIGl0cyB0cmFuc2Zlcikgcm9sbHMgYmFjay4AAAAADkNhbGxiYWNrRmFpbGVkAAAAAAAJAAAAAAAAAAhPdmVyZmxvdwAAAAwAAABsVGhlIHJlbGVhc2VyIHNldCBpcyBlbXB0eSwgb3IgYHRocmVzaG9sZGAgaXMgMCBvciBsYXJnZXIgdGhhbiB0aGUKbnVtYmVyIG9mIHJlbGVhc2VycyDigJQgc2VlIGRvY3MvYWRyLzAwMDcuAAAAEEludmFsaWRUaHJlc2hvbGQAAAANAAAAQ01vcmUgdGhhbiBgTUFYX1JFTEVBU0VSU2AgKDEwKSBhZGRyZXNzZXMgd2VyZSBzdXBwbGllZCBhdCBjcmVhdGlvbi4AAAAAEFRvb01hbnlSZWxlYXNlcnMAAAAOAAAAn0Zld2VyIGRpc3RpbmN0IGFwcHJvdmFscyB3ZXJlIHN1cHBsaWVkIHRoYW4gdGhlIGVzY3JvdydzIHRocmVzaG9sZCwKb3IgYSBzaW5nbGUgcmVsZWFzZXIgdHJpZWQgdG8gc2V0dGxlIGEgcXVvcnVtIGVzY3JvdyB0aHJvdWdoIHRoZQpzaW5nbGUtY2FsbGVyIGVudHJ5IHBvaW50LgAAAAAPVGhyZXNob2xkTm90TWV0AAAAAA8AAABoVGhlIHNhbWUgYWRkcmVzcyBhcHBlYXJlZCB0d2ljZSBpbiBvbmUgYXBwcm92YWwgbGlzdC4gRHVwbGljYXRlcwpuZXZlciBjb3VudCB0d2ljZSB0b3dhcmQgdGhlIHRocmVzaG9sZC4AAAARRHVwbGljYXRlQXBwcm92ZXIAAAAAAAAQAAAAQFRoZSBzYW1lIGFkZHJlc3MgYXBwZWFyZWQgdHdpY2UgaW4gdGhlIHJlbGVhc2VyIHNldCBhdCBjcmVhdGlvbi4AAAARRHVwbGljYXRlUmVsZWFzZXIAAAAAAAARAAAAAAAAABJBY2NlcHRhbmNlUmVxdWlyZWQAAAAAABIAAAAAAAAAF0FjY2VwdGFuY2VOb3RDb25maWd1cmVkAAAAABMAAAAAAAAAD0FscmVhZHlBY2NlcHRlZAAAAAAUAAAAOFRoZSBuZXcgcmVsZWFzZXIgY2Fubm90IGJlIHRoZSBlc2Nyb3cgY29udHJhY3Qgb3IgcGF5ZWUuAAAAD0ludmFsaWRSZWxlYXNlcgAAAAAYAAAAfGByZWZ1bmRfdG9gIHdhcyB0aGUgZXNjcm93IGNvbnRyYWN0J3Mgb3duIGFkZHJlc3Mg4oCUIGZ1bmRzIHNlbnQKdGhlcmUgb24gcmVmdW5kIGNvdWxkIG5ldmVyIGJlIG1vdmVkIGFnYWluIChkb2NzL2Fkci8wMDA5KS4AAAAPSW52YWxpZFJlZnVuZFRvAAAAABUAAABEVGhlIGNvbmZpZ3VyZWQgcmVsZWFzZSB0aW1lIGlzIGluIHRoZSBwYXN0IG9yIGFmdGVyIHRoZSByZWZ1bmQgdGltZS4AAAAXSW52YWxpZFJlbGVhc2VOb3RCZWZvcmUAAAAAFgAAADFSZWxlYXNlIHdhcyBhdHRlbXB0ZWQgYmVmb3JlIHRoZSBjb25maWd1cmVkIHRpbWUuAAAAAAAAD1JlbGVhc2VUb29FYXJseQAAAAAXAAAAuk5ldyBkZXBvc2l0cyBhcmUgYmxvY2tlZDogdGhlIGNvbnRyYWN0IGlzIHBhdXNlZCAoZG9jcy9hZHIvMDAxMSkuCk9ubHkgZGVwb3NpdCBwYXRocyByZXR1cm4gdGhpcyDigJQgZXZlcnkgb3V0Ym91bmQgcGF0aCAoYHJlbGVhc2VgLApgcmVmdW5kYCwgdGltZW91dCByZWZ1bmQpIGlzIHVuYWZmZWN0ZWQgYnkgdGhlIHBhdXNlLgAAAAAABlBhdXNlZAAAAAAAGgAAAJ5gcGF1c2VgIGNhbGxlZCB3aGlsZSB0aGUgY29udHJhY3QgaXMgYWxyZWFkeSBwYXVzZWQg4oCUIGEgbm8tb3AgaXMKcmVqZWN0ZWQgcmF0aGVyIHRoYW4gZW1pdHRpbmcgYW4gZXZlbnQgZm9yIGEgdHJhbnNpdGlvbiB0aGF0CmRpZG4ndCBoYXBwZW4gKGRvY3MvYWRyLzAwMTEpLgAAAAAADUFscmVhZHlQYXVzZWQAAAAAAAAbAAAAQmB1bnBhdXNlYCBjYWxsZWQgd2hpbGUgdGhlIGNvbnRyYWN0IGlzIG5vdCBwYXVzZWQgKGRvY3MvYWRyLzAwMTEpLgAAAAAACU5vdFBhdXNlZAAAAAAAABw=",
+        "AAAABQAAAIhFbWl0dGVkIGJ5IGBwYXVzZWAgKGRvY3MvYWRyLzAwMTEpLiBDYXJyaWVzIHRoZSBjdXN0b2RpYW4gdGhhdCBmbGlwcGVkCnRoZSBmbGFnIHNvIGludGVncmF0b3JzIGFuZCBtb25pdG9yaW5nIGNhbiByZWFjdCB3aXRob3V0IHBvbGxpbmcuAAAAAAAAAAZQYXVzZWQAAAAAAAEAAAAGcGF1c2VkAAAAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
+        "AAAABQAAACVFbWl0dGVkIGJ5IGB1bnBhdXNlYCAoZG9jcy9hZHIvMDAxMSkuAAAAAAAAAAAAAAhVbnBhdXNlZAAAAAEAAAAIdW5wYXVzZWQAAAABAAAAAAAAAAVhZG1pbgAAAAAAABMAAAABAAAAAg==",
+        "AAAAAQAAAAAAAAAAAAAACkVzY3Jvd0RhdGEAAAAAAA4AAAA1TGVkZ2VyIHRpbWVzdGFtcCBhdCB3aGljaCB0aGUgcGF5ZWUgYWNjZXB0ZWQsIGlmIGFueS4AAAAAAAALYWNjZXB0ZWRfYXQAAAAD6AAAAAYAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANY29uZGl0aW9uX3JlZgAAAAAAABAAAACGSWYgdHJ1ZSwgaW52b2tlIHRoZSBjb250cmFjdCBwYXllZSdzIGBvbl9lc2Nyb3dfcmVsZWFzZWRgIGhvb2sgYWZ0ZXIKdGhlIHBheW91dCB0cmFuc2Zlci4gQSBmYWlsZWQgY2FsbGJhY2sgcmV2ZXJ0cyB0aGUgd2hvbGUgcmVsZWFzZS4AAAAAAAxub3RpZnlfcGF5ZWUAAAABAAAAAAAAAAVwYXllZQAAAAAAABMAAAB6VGhlIGZ1bmRlcjogYXV0aG9yaXNlcyBhbmQgcGF5cyBmb3IgdGhlIGVzY3JvdyBhdCBjcmVhdGlvbi4gQWxzbwp0aGUgcmVmdW5kIGRlc3RpbmF0aW9uIHVubGVzcyBgcmVmdW5kX3RvYCBzYXlzIG90aGVyd2lzZS4AAAAAAAVwYXllcgAAAAAAABMAAADFT3B0aW9uYWwgZGVhZGxpbmUgKHVuaXggc2Vjb25kcykgYWZ0ZXIgd2hpY2ggYHJlZnVuZGAgb3BlbnMgdG8KYW55b25lIOKAlCBzdGlsbCBvbmx5IHRvIGByZWZ1bmRfdG9gLiBgTm9uZWAgbWVhbnMgbm8gdGltZW91dCwKYmVoYXZpb3VyIGlkZW50aWNhbCB0byBiZWZvcmUgdGhpcyBmaWVsZCBleGlzdGVkIOKAlCBzZWUgZG9jcy9hZHIvMDAwNC4AAAAAAAAMcmVmdW5kX2FmdGVyAAAD6AAAAAYAAADhV2hlcmUgKipldmVyeSoqIHJlZnVuZCBwYXRoIChyZWxlYXNlciwgdGltZW91dCkgc2VuZHMgdGhlIGZ1bmRzLgpGaXhlZCBhdCBjcmVhdGlvbiB1bmRlciB0aGUgZnVuZGVyJ3MgYXV0aCBhbmQgbmV2ZXIgY2hvc2VuIGF0CnBheW91dCwgc28gaW52YXJpYW50IEkxIGhvbGRzOyBkZWZhdWx0cyB0byBgcGF5ZXJgIHdoZW4gb21pdHRlZCBhdApjcmVhdGlvbiDigJQgc2VlIGRvY3MvYWRyLzAwMDkuAAAAAAAACXJlZnVuZF90bwAAAAAAABMAAAA2RWFybGllc3QgbGVkZ2VyIHRpbWVzdGFtcCBhdCB3aGljaCByZWxlYXNlIGlzIGFsbG93ZWQuAAAAAAAScmVsZWFzZV9ub3RfYmVmb3JlAAAAAAPoAAAABgAAAL1BZGRyZXNzZXMgcGVybWl0dGVkIHRvIHNldHRsZSB0aGlzIGVzY3JvdyDigJQgc2VlIGRvY3MvYWRyLzAwMDIgZm9yIHRoZQpwZXItZXNjcm93IHJlbGVhc2VyLCBhbmQgZG9jcy9hZHIvMDAwNyBmb3IgTS1vZi1OIHNldHMuIEEgcGxhaW4Kc2luZ2xlLXJlbGVhc2VyIGVzY3JvdyBzdG9yZXMgZXhhY3RseSBvbmUgZW50cnkgaGVyZS4AAAAAAAAJcmVsZWFzZXJzAAAAAAAD6gAAABMAAAA5V2hldGhlciByZWxlYXNlIHJlcXVpcmVzIHRoZSBwYXllZSdzIGV4cGxpY2l0IGFjY2VwdGFuY2UuAAAAAAAAE3JlcXVpcmVzX2FjY2VwdGFuY2UAAAAAAQAAAAAAAAAGc3RhdHVzAAAAAAfQAAAADEVzY3Jvd1N0YXR1cwAAALpIb3cgbWFueSAqZGlzdGluY3QqIGFkZHJlc3NlcyBmcm9tIGByZWxlYXNlcnNgIG11c3QgYXV0aG9yaXplIG9uZQpzZXR0bGVtZW50LiBBbHdheXMgYD49IDFgIGFuZCBgPD0gcmVsZWFzZXJzLmxlbigpYDsgYDFgIG1lYW5zIGFueQpzaW5nbGUgcmVsZWFzZXIgY2FuIHNldHRsZSAodGhlIHByZS1xdW9ydW0gYmVoYXZpb3VyKS4AAAAAAAl0aHJlc2hvbGQAAAAAAAAEAAAAAAAAAAV0b2tlbgAAAAAAABM=",
         "AAAAAgAAAAAAAAAAAAAADEVzY3Jvd1N0YXR1cwAAAAMAAAAAAAAAAAAAAAZGdW5kZWQAAAAAAAAAAAAAAAAACFJlbGVhc2VkAAAAAAAAAAAAAAAIUmVmdW5kZWQ=",
-        "AAAAAAAAAadCbG9ja3MgbmV3IGRlcG9zaXRzIChgY3JlYXRlX2VzY3Jvd2ApIHVudGlsIGB1bnBhdXNlYCBpcyBjYWxsZWQuCkNhbGxhYmxlIG9ubHkgYnkgdGhlIGN1c3RvZGlhbiBzZXQgYXQgZGVwbG95bWVudCwgd2hpY2ggbXVzdCBzaWduCnRoaXMgY2FsbCAoZG9jcy9hZHIvMDAwNSkuIEVtaXRzIGEgYFBhdXNlZGAgZXZlbnQgY2FycnlpbmcgdGhhdAphZGRyZXNzLgoKRGVsaWJlcmF0ZWx5IGhhcyBubyBlZmZlY3Qgb24gbW9uZXkgYWxyZWFkeSBlc2Nyb3dlZDogYHJlbGVhc2VgLApgcmVmdW5kYCBhbmQgdGhlIHRpbWVvdXQgcmVmdW5kIGRvIG5vdCByZWFkIHRoZSBmbGFnLCBzbyBhIHBhdXNlIGNhbgpuZXZlciBsb2NrIGV4aXN0aW5nIGZ1bmRzLiBFcnJvcnMgYEFscmVhZHlQYXVzZWRgIGlmIHRoZSBjb250cmFjdCBpcwphbHJlYWR5IHBhdXNlZC4AAAAABXBhdXNlAAAAAAAAAQAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAACAAAAAw==",
-        "AAAAAAAAAn1SZXR1cm5zIHRoZSBlc2Nyb3dlZCBgYW1vdW50YCB0byBgcGF5ZXJgLiBTYW1lIHN0YXRlIHJ1bGUgYXMKYHJlbGVhc2VgIChvbmx5IHdoaWxlIGBGdW5kZWRgKSwgYnV0IHR3byBjYWxsZXJzIGFyZSBhdXRob3Jpc2VkOgoKLSB0aGUgZXNjcm93J3MgYHJlbGVhc2VyYCAoZG9jcy9hZHIvMDAwMiksIGFsd2F5czsgb3IKLSAqKmFueW9uZSoqLCBvbmNlIGByZWZ1bmRfYWZ0ZXJgIGhhcyBiZWVuIHJlYWNoZWQg4oCUIHRoZSB0aW1lb3V0CnJlZnVuZCBwYXRoIGZvciBhIGxvc3QvdW5zaWduYWJsZSBgcmVsZWFzZXJgIGtleSAoZG9jcy9hZHIvMDAwNCkuCgpUaGUgZGVzdGluYXRpb24gbmV2ZXIgY2hhbmdlczogdGltZW91dCBvciBub3QsIGZ1bmRzIG9ubHkgZXZlciBnbwpiYWNrIHRvIHRoZSBzdG9yZWQgYHBheWVyYC4gV2l0aCBubyBgcmVmdW5kX2FmdGVyYCBzZXQsIGJlaGF2aW91cgppcyBpZGVudGljYWwgdG8gYmVmb3JlIHRoZSB0aW1lb3V0IGV4aXN0ZWQg4oCUIHJlbGVhc2VyIG9ubHkuCgpEZWxpYmVyYXRlbHkgKipub3QqKiBnYXRlZCBieSB0aGUgZW1lcmdlbmN5IHBhdXNlIChkb2NzL2Fkci8wMDA1KToKcGF1c2luZyBuZXcgZGVwb3NpdHMgbXVzdCBuZXZlciB0cmFwIGZ1bmRzIGFscmVhZHkgZXNjcm93ZWQuAAAAAAAABnJlZnVuZAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAACAAAAAw==",
-        "AAAAAAAAArBNb3ZlcyB0aGUgZXNjcm93ZWQgYGFtb3VudGAgdG8gYHBheWVlYC4gT25seSB0aGUgZXNjcm93J3MKYHJlbGVhc2VyYCAoc2V0IGF0IGBjcmVhdGVfZXNjcm93YCB0aW1lKSBtYXkgY2FsbCB0aGlzIOKAlCB0aGUKY29udHJhY3QgZW5mb3JjZXMgV0hPLCBuZXZlciBXSFkgKEFEUiAwMDAxKS4gRXJyb3JzIGlmIHRoZQplc2Nyb3cgZG9lc24ndCBleGlzdCwgYGNhbGxlcmAgaXNuJ3QgdGhlIHJlbGVhc2VyLCBvciB0aGUgZXNjcm93Cmlzbid0IGN1cnJlbnRseSBgRnVuZGVkYCAobm8gZG91YmxlLXJlbGVhc2UsIG5vIHJlbGVhc2luZyBhCnJlZnVuZGVkIGVzY3JvdykuCgpEZWxpYmVyYXRlbHkgKipub3QqKiBnYXRlZCBieSBgcmVmdW5kX2FmdGVyYCAoZG9jcy9hZHIvMDAwNCk6IGFmdGVyCnRoZSBkZWFkbGluZSB0aGUgcmVsZWFzZXIgY2FuIHN0aWxsIHJlbGVhc2UsIHJhY2luZyBhbnkgdGltZW91dApyZWZ1bmQg4oCUIHdob2V2ZXIgbGFuZHMgZmlyc3Qgd2lucyBhbmQgdGhlIG90aGVyIGZhaWxzIGBOb3RGdW5kZWRgLgoKQWxzbyBkZWxpYmVyYXRlbHkgKipub3QqKiBnYXRlZCBieSB0aGUgZW1lcmdlbmN5IHBhdXNlCihkb2NzL2Fkci8wMDA1KTogZnVuZHMgbXVzdCBhbHdheXMgYmUgYWJsZSB0byBsZWF2ZSBhbiBleGlzdGluZwplc2Nyb3csIHdoYXRldmVyIHN0YXRlIG5ldyBkZXBvc2l0cyBhcmUgaW4uAAAAB3JlbGVhc2UAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAACAAAAAw==",
-        "AAAAAAAAAUNSZS1vcGVucyBuZXcgZGVwb3NpdHMuIFNhbWUgYXV0aCBhcyBgcGF1c2VgIOKAlCBvbmx5IHRoZSBjdXN0b2RpYW4Kc2V0IGF0IGRlcGxveW1lbnQuIEVtaXRzIGFuIGBVbnBhdXNlZGAgZXZlbnQuIEVycm9ycyBgTm90UGF1c2VkYCBpZgp0aGUgY29udHJhY3QgaXNuJ3QgcGF1c2VkLgoKVW5wYXVzaW5nIGlzIG5vdCB0aW1lbG9ja2VkIG9uIHB1cnBvc2UgKGRvY3MvYWRyLzAwMDUpOiBpdCByZXN0b3Jlcwpub3JtYWwgb3BlcmF0aW9uIGFuZCBjYW5ub3QgdG91Y2ggYSBzaW5nbGUgZXNjcm93LCBzbyBkZWxheWluZyBpdAp3b3VsZCBvbmx5IGRlbGF5IHJlY292ZXJ5LgAAAAAHdW5wYXVzZQAAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAABAAAD6QAAAAIAAAAD",
-        "AAAAAAAAAJ5SZWFkLW9ubHk6IGlzIHRoZSBlbWVyZ2VuY3kgcGF1c2UgY3VycmVudGx5IGJsb2NraW5nIG5ldyBkZXBvc2l0cz8KU2F5cyBub3RoaW5nIGFib3V0IGV4aXN0aW5nIGVzY3Jvd3Mg4oCUIGByZWxlYXNlYC9gcmVmdW5kYCB3b3JrIGVpdGhlcgp3YXkgKGRvY3MvYWRyLzAwMDUpLgAAAAAACWlzX3BhdXNlZAAAAAAAAAAAAAABAAAAAQ==",
-        "AAAAAAAAASpSZWFkLW9ubHkgYWNjZXNzb3IgZm9yIGV2ZXJ5dGhpbmcgc3RvcmVkIGFib3V0IGBlc2Nyb3dfaWRgIOKAlApwYXllciwgcGF5ZWUsIHRva2VuLCBhbW91bnQsIGBjb25kaXRpb25fcmVmYCwgc3RhdHVzLCBgcmVsZWFzZXJgCmFuZCBgcmVmdW5kX2FmdGVyYC4gRXhpc3RzIHNvIHBheWVlcyBhbmQgaW50ZWdyYXRvcnMgY2FuIGNoZWNrCnRoZSBkZWFkbGluZSBiZWZvcmUgcmVseWluZyBvbiBhIGBGdW5kZWRgIGVzY3JvdyAoZG9jcy9hZHIvMDAwNCwKdGhyZWF0IG1vZGVsIFQ4KS4gRXJyb3JzIG9uIGFuIHVua25vd24gaWQuAAAAAAAKZ2V0X2VzY3JvdwAAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPpAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAD",
+        "AAAAAAAAAcdCbG9ja3MgbmV3IGRlcG9zaXRzIChgY3JlYXRlX2VzY3Jvd2AgYW5kIGl0cyB2YXJpYW50cywgcGx1cwpgdG9wX3VwYCkgdW50aWwgYHVucGF1c2VgIGlzIGNhbGxlZC4gQ2FsbGFibGUgb25seSBieSB0aGUgY3VzdG9kaWFuCnNldCBhdCBkZXBsb3ltZW50LCB3aGljaCBtdXN0IHNpZ24gdGhpcyBjYWxsIChkb2NzL2Fkci8wMDExKS4gRW1pdHMKYSBgUGF1c2VkYCBldmVudCBjYXJyeWluZyB0aGF0IGFkZHJlc3MuCgpEZWxpYmVyYXRlbHkgaGFzIG5vIGVmZmVjdCBvbiBtb25leSBhbHJlYWR5IGVzY3Jvd2VkOiBgcmVsZWFzZWAsCmByZWZ1bmRgIGFuZCB0aGUgdGltZW91dCByZWZ1bmQgZG8gbm90IHJlYWQgdGhlIGZsYWcsIHNvIGEgcGF1c2UgY2FuCm5ldmVyIGxvY2sgZXhpc3RpbmcgZnVuZHMuIEVycm9ycyBgQWxyZWFkeVBhdXNlZGAgaWYgdGhlIGNvbnRyYWN0IGlzCmFscmVhZHkgcGF1c2VkLgAAAAAFcGF1c2UAAAAAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAD1SZWNvcmRzIHRoZSBwYXllZSdzIGFjY2VwdGFuY2UgZm9yIGFuIG9wdGVkLWluIGZ1bmRlZCBlc2Nyb3cuAAAAAAAABmFjY2VwdAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAFcGF5ZWUAAAAAAAATAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAA4pSZXR1cm5zIHRoZSBlc2Nyb3dlZCBgYW1vdW50YCB0byB0aGUgZXNjcm93J3MgYHJlZnVuZF90b2AgKHRoZQpgcGF5ZXJgIHVubGVzcyBhIGRpZmZlcmVudCBkZXN0aW5hdGlvbiB3YXMgZml4ZWQgYXQgY3JlYXRpb24g4oCUCmRvY3MvYWRyLzAwMDYpLiBTYW1lIHN0YXRlIHJ1bGUgYXMKYHJlbGVhc2VgIChvbmx5IHdoaWxlIGBGdW5kZWRgKSwgYnV0IHR3byBjYWxsZXJzIGFyZSBhdXRob3Jpc2VkOgoKLSB0aGUgZXNjcm93J3MgcmVsZWFzZXIgKGRvY3MvYWRyLzAwMDIpLCBhbHdheXM7IG9yCi0gKiphbnlvbmUqKiwgb25jZSBgcmVmdW5kX2FmdGVyYCBoYXMgYmVlbiByZWFjaGVkIOKAlCB0aGUgdGltZW91dApyZWZ1bmQgcGF0aCBmb3IgYSBsb3N0L3Vuc2lnbmFibGUgcmVsZWFzZXIga2V5IChkb2NzL2Fkci8wMDA0KS4KClRoZSBkZXN0aW5hdGlvbiBuZXZlciBjaGFuZ2VzOiB0aW1lb3V0IG9yIG5vdCwgZnVuZHMgb25seSBldmVyIGdvCnRvIHRoZSBzdG9yZWQgYHJlZnVuZF90b2AsIHdoaWNoIG5vIGNhbGxlciBjYW4gaW5mbHVlbmNlLiBXaXRoIG5vCmByZWZ1bmRfYWZ0ZXJgIHNldCwgYmVoYXZpb3VyIGlzIGlkZW50aWNhbCB0byBiZWZvcmUgdGhlIHRpbWVvdXQKZXhpc3RlZCDigJQgcmVsZWFzZXIgb25seS4gT24gYW4gTS1vZi1OIGVzY3JvdyB0aGUgcmVsZWFzZXIgcGF0aCBuZWVkcwphIHRocmVzaG9sZCBvZiAxOyBvdGhlcndpc2UgdXNlIGByZWZ1bmRfd2l0aF9hcHByb3ZhbHNgICh0aGUgdGltZW91dApwYXRoIHN0YXlzIG9wZW4gdG8gYW55b25lKS4KCkRlbGliZXJhdGVseSAqKm5vdCoqIGdhdGVkIGJ5IHRoZSBlbWVyZ2VuY3kgcGF1c2UgKGRvY3MvYWRyLzAwMTEpOgpwYXVzaW5nIG5ldyBkZXBvc2l0cyBtdXN0IG5ldmVyIHRyYXAgZnVuZHMgYWxyZWFkeSBlc2Nyb3dlZC4AAAAAAAZyZWZ1bmQAAAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAAAAAAABmNhbGxlcgAAAAAAEwAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAHVBZGRzIGZ1bmRzIHRvIGEgZnVuZGVkIGVzY3JvdyB3aXRob3V0IGNoYW5naW5nIGl0cyBwYXJ0aWVzIG9yIGlkLgpPbmx5IGl0cyBvcmlnaW5hbCBwYXllciBtYXkgYXV0aG9yaXplIHRoZSB0cmFuc2Zlci4AAAAAAAAGdG9wX3VwAAAAAAADAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAVwYXllcgAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAnBNb3ZlcyB0aGUgZXNjcm93ZWQgYGFtb3VudGAgdG8gYHBheWVlYC4gT25seSB0aGUgZXNjcm93J3MgcmVsZWFzZXIKbWF5IGNhbGwgdGhpcyDigJQgdGhlIGNvbnRyYWN0IGVuZm9yY2VzIFdITywgbmV2ZXIgV0hZIChBRFIgMDAwMSkuIE9uCmFuIE0tb2YtTiBlc2Nyb3cgdGhpcyBzaW5nbGUtY2FsbGVyIHBhdGggaXMgb25seSBhbGxvd2VkIHdoZW4gdGhlCnRocmVzaG9sZCBpcyAxOyBvdGhlcndpc2UgdXNlIGByZWxlYXNlX3dpdGhfYXBwcm92YWxzYC4KCkRlbGliZXJhdGVseSAqKm5vdCoqIGdhdGVkIGJ5IGByZWZ1bmRfYWZ0ZXJgIChkb2NzL2Fkci8wMDA0KTogYWZ0ZXIKdGhlIGRlYWRsaW5lIHRoZSByZWxlYXNlciBjYW4gc3RpbGwgcmVsZWFzZSwgcmFjaW5nIGFueSB0aW1lb3V0CnJlZnVuZCDigJQgd2hvZXZlciBsYW5kcyBmaXJzdCB3aW5zIGFuZCB0aGUgb3RoZXIgZmFpbHMgYE5vdEZ1bmRlZGAuCgpBbHNvIGRlbGliZXJhdGVseSAqKm5vdCoqIGdhdGVkIGJ5IHRoZSBlbWVyZ2VuY3kgcGF1c2UKKGRvY3MvYWRyLzAwMTEpOiBmdW5kcyBtdXN0IGFsd2F5cyBiZSBhYmxlIHRvIGxlYXZlIGFuIGV4aXN0aW5nCmVzY3Jvdywgd2hhdGV2ZXIgc3RhdGUgbmV3IGRlcG9zaXRzIGFyZSBpbi4AAAAHcmVsZWFzZQAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAZjYWxsZXIAAAAAABMAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAUNSZS1vcGVucyBuZXcgZGVwb3NpdHMuIFNhbWUgYXV0aCBhcyBgcGF1c2VgIOKAlCBvbmx5IHRoZSBjdXN0b2RpYW4Kc2V0IGF0IGRlcGxveW1lbnQuIEVtaXRzIGFuIGBVbnBhdXNlZGAgZXZlbnQuIEVycm9ycyBgTm90UGF1c2VkYCBpZgp0aGUgY29udHJhY3QgaXNuJ3QgcGF1c2VkLgoKVW5wYXVzaW5nIGlzIG5vdCB0aW1lbG9ja2VkIG9uIHB1cnBvc2UgKGRvY3MvYWRyLzAwMTEpOiBpdCByZXN0b3Jlcwpub3JtYWwgb3BlcmF0aW9uIGFuZCBjYW5ub3QgdG91Y2ggYSBzaW5nbGUgZXNjcm93LCBzbyBkZWxheWluZyBpdAp3b3VsZCBvbmx5IGRlbGF5IHJlY292ZXJ5LgAAAAAHdW5wYXVzZQAAAAABAAAAAAAAAAZjYWxsZXIAAAAAABMAAAABAAAD6QAAAAIAAAAD",
+        "AAAAAAAAAJ5SZWFkLW9ubHk6IGlzIHRoZSBlbWVyZ2VuY3kgcGF1c2UgY3VycmVudGx5IGJsb2NraW5nIG5ldyBkZXBvc2l0cz8KU2F5cyBub3RoaW5nIGFib3V0IGV4aXN0aW5nIGVzY3Jvd3Mg4oCUIGByZWxlYXNlYC9gcmVmdW5kYCB3b3JrIGVpdGhlcgp3YXkgKGRvY3MvYWRyLzAwMTEpLgAAAAAACWlzX3BhdXNlZAAAAAAAAAAAAAABAAAAAQ==",
+        "AAAAAAAAAXFSZWFkLW9ubHkgYWNjZXNzb3IgZm9yIGV2ZXJ5dGhpbmcgc3RvcmVkIGFib3V0IGBlc2Nyb3dfaWRgIOKAlCBwYXllciwKcGF5ZWUsIHRva2VuLCBhbW91bnQsIGBjb25kaXRpb25fcmVmYCwgc3RhdHVzLCB0aGUgcmVsZWFzZXIgc2V0IHdpdGgKaXRzIHRocmVzaG9sZCwgYHJlZnVuZF9hZnRlcmAgYW5kIGByZWZ1bmRfdG9gLiBFeGlzdHMgc28gcGF5ZWVzIGFuZAppbnRlZ3JhdG9ycyBjYW4gY2hlY2sgd2hvIGNhbiBzZXR0bGUsIHdoZW4sIGFuZCB3aGVyZSBhIHJlZnVuZCBnb2VzCmJlZm9yZSByZWx5aW5nIG9uIGEgYEZ1bmRlZGAgZXNjcm93IChkb2NzL2Fkci8wMDA0LCB0aHJlYXQgbW9kZWwgVDgpLgpFcnJvcnMgb24gYW4gdW5rbm93biBpZC4AAAAAAAAKZ2V0X2VzY3JvdwAAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPpAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAD",
         "AAAAAAAAADxSZWFkLW9ubHkgc3RhdHVzIHF1ZXJ5LiBFcnJvcnMgaWYgYGVzY3Jvd19pZGAgZG9lc24ndCBleGlzdC4AAAAKZ2V0X3N0YXR1cwAAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPpAAAH0AAAAAxFc2Nyb3dTdGF0dXMAAAAD",
-        "AAAAAAAAAdZEZXBsb3ktdGltZSBjb25maWd1cmF0aW9uIChkb2NzL2Fkci8wMDA1KTogc3RvcmVzIHRoZSBzaW5nbGUKYWRkcmVzcyBwZXJtaXR0ZWQgdG8gYHBhdXNlYC9gdW5wYXVzZWAuIFRoZXJlIGlzIG5vIHNldHRlciwgc28gdGhlCmN1c3RvZGlhbiBjYW5ub3QgYmUgY2hhbmdlZCBhZnRlciBkZXBsb3ltZW50IOKAlCBhIG5ldyBjdXN0b2RpYW4gbWVhbnMKYSBuZXcgZGVwbG95bWVudC4gTm8gYXV0aCBpcyByZXF1aXJlZCBoZXJlOiB0aGUgY29uc3RydWN0b3IgcnVucyBhcwpwYXJ0IG9mIGRlcGxveWluZyB0aGUgaW5zdGFuY2UsIGJlZm9yZSBhbnkgY2FsbGVyIGV4aXN0cy4KClRoZSBjdXN0b2RpYW4gaXMgZGVsaWJlcmF0ZWx5IHdlYWs6IGl0cyBvbmx5IHBvd2VyIGlzIHRvIHJlZnVzZQoqKm5ldyoqIGVzY3Jvd3MuIEl0IGNhbm5vdCByZWxlYXNlLCByZWZ1bmQsIGVkaXQgYW4gZXNjcm93LCBvcgp1cGdyYWRlIGFueXRoaW5nLgAAAAAADV9fY29uc3RydWN0b3IAAAAAAAABAAAAAAAAAAtwYXVzZV9hZG1pbgAAAAATAAAAAA==",
-        "AAAAAAAAAtlMb2NrcyBgYW1vdW50YCBvZiBgdG9rZW5gIHB1bGxlZCBmcm9tIGBwYXllcmAsIGhlbGQgZm9yIGBwYXllZWAsCnRhZ2dlZCB3aXRoIGFuIG9wYXF1ZSBgY29uZGl0aW9uX3JlZmAuIGByZWxlYXNlcmAgaXMgdGhlIG9ubHkKYWRkcmVzcyB0aGF0IHdpbGwgbGF0ZXIgYmUgcGVybWl0dGVkIHRvIGNhbGwgYHJlbGVhc2VgL2ByZWZ1bmRgCm9uIHRoaXMgZXNjcm93IChzZWUgZG9jcy9hZHIvMDAwMikuIGByZWZ1bmRfYWZ0ZXJgIGlzIGFuIG9wdGlvbmFsCnVuaXggdGltZXN0YW1wIGFmdGVyIHdoaWNoIGByZWZ1bmRgIG9wZW5zIHRvIGFueSBjYWxsZXIsIGFsd2F5cwpiYWNrIHRvIGBwYXllcmAgKGRvY3MvYWRyLzAwMDQpOyBgTm9uZWAgbWVhbnMgbm8gdGltZW91dC4KUmVxdWlyZXMgYHBheWVyYCBhdXRoICh0aGUgY29udHJhY3QgbW92ZXMgdGhlaXIgZnVuZHMpLiBSZXR1cm5zCnRoZSBuZXcgZXNjcm93J3MgaWQuCgpUaGlzIGlzIHRoZSBjb250cmFjdCdzIG9ubHkgZGVwb3NpdCBwYXRoLCBhbmQgdGhlIG9ubHkgZnVuY3Rpb24gdGhlCmVtZXJnZW5jeSBwYXVzZSBnYXRlcyAoZG9jcy9hZHIvMDAwNSk6IHdoaWxlIHBhdXNlZCBpdCBmYWlscyB3aXRoCmBQYXVzZWRgIGJlZm9yZSBhbnkgZnVuZHMgbW92ZSwgbm8gZXNjcm93IGlkIGlzIGNvbnN1bWVkIGFuZCBub3RoaW5nCmlzIHN0b3JlZC4gQW55IGZ1dHVyZSBkZXBvc2l0IHBhdGggbXVzdCBhcHBseSB0aGUgc2FtZSBjaGVjay4AAAAAAAANY3JlYXRlX2VzY3JvdwAAAAAAAAcAAAAAAAAABXBheWVyAAAAAAAAEwAAAAAAAAAFcGF5ZWUAAAAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANY29uZGl0aW9uX3JlZgAAAAAAABAAAAAAAAAACHJlbGVhc2VyAAAAEwAAAAAAAAAMcmVmdW5kX2FmdGVyAAAD6AAAAAYAAAABAAAD6QAAAAYAAAAD",
-        "AAAAAAAAAPdSZWFkLW9ubHk6IHRoZSBjdXN0b2RpYW4gYWRkcmVzcyB0aGF0IG1heSBgcGF1c2VgL2B1bnBhdXNlYCwgc28KaW50ZWdyYXRvcnMgY2FuIHZlcmlmeSB3aG8gaG9sZHMgdGhlIHJvbGUgd2l0aG91dCB0cnVzdGluZyBkb2NzCihkb2NzL2Fkci8wMDA1KS4gYE5vbmVgIG9ubHkgZm9yIGFuIGluc3RhbmNlIGRlcGxveWVkIHdpdGhvdXQgYQpjb25zdHJ1Y3Rvciwgd2hpY2ggdGhpcyBjb250cmFjdCdzIFdBU00gZG9lcyBub3QgYWxsb3cuAAAAAA9nZXRfcGF1c2VfYWRtaW4AAAAAAAAAAAEAAAPoAAAAEw==" ]),
+        "AAAAAAAAAj5TZXRzIHRoZSBpbW11dGFibGUgdG9rZW4gYWxsb3dsaXN0IGF0IGRlcGxveW1lbnQuIEFuIGVtcHR5IGxpc3QKcHJlc2VydmVzIHRoZSBsZWdhY3kgYmVoYXZpb3IgYW5kIGFsbG93cyBhbnkgdG9rZW4gYWRkcmVzcy4KCkFsc28gc3RvcmVzIHRoZSBzaW5nbGUgYWRkcmVzcyBwZXJtaXR0ZWQgdG8gYHBhdXNlYC9gdW5wYXVzZWAKKGRvY3MvYWRyLzAwMTEpLiBUaGVyZSBpcyBubyBzZXR0ZXIsIHNvIHRoZSBjdXN0b2RpYW4gY2Fubm90IGJlCmNoYW5nZWQgYWZ0ZXIgZGVwbG95bWVudCDigJQgYSBuZXcgY3VzdG9kaWFuIG1lYW5zIGEgbmV3IGRlcGxveW1lbnQuCk5vIGF1dGggaXMgcmVxdWlyZWQgaGVyZTogdGhlIGNvbnN0cnVjdG9yIHJ1bnMgYXMgcGFydCBvZiBkZXBsb3lpbmcKdGhlIGluc3RhbmNlLCBiZWZvcmUgYW55IGNhbGxlciBleGlzdHMuCgpUaGUgY3VzdG9kaWFuIGlzIGRlbGliZXJhdGVseSB3ZWFrOiBpdHMgb25seSBwb3dlciBpcyB0byByZWZ1c2UKKipuZXcqKiBkZXBvc2l0cy4gSXQgY2Fubm90IHJlbGVhc2UsIHJlZnVuZCwgZWRpdCBhbiBlc2Nyb3csIG9yCnVwZ3JhZGUgYW55dGhpbmcuAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAIAAAAAAAAADmFsbG93ZWRfdG9rZW5zAAAAAAPqAAAAEwAAAAAAAAALcGF1c2VfYWRtaW4AAAAAEwAAAAA=",
+        "AAAAAAAABABMb2NrcyBgYW1vdW50YCBvZiBgdG9rZW5gIHB1bGxlZCBmcm9tIGBwYXllcmAsIGhlbGQgZm9yIGBwYXllZWAsCmRvY3MvdGhyZWF0LW1vZGVsLm1kIFQxMCBhbmQgUk9BRE1BUC5tZCBQaGFzZSBFNSkuIGByZWxlYXNlcmAgaXMgdGhlCmFkZHJlc3MgcGVybWl0dGVkIHRvIGNhbGwgYHJlbGVhc2VgL2ByZWZ1bmRgIG9uIHRoaXMgZXNjcm93Cihkb2NzL2Fkci8wMDAyKS4gYHJlZnVuZF9hZnRlcmAgaXMgb3B0aW9uYWwgKGRvY3MvYWRyLzAwMDQpLgpgbm90aWZ5X3BheWVlYCBvcHRzIGFuIGltcGxlbWVudGluZyBjb250cmFjdCBwYXllZSBpbnRvCmBvbl9lc2Nyb3dfcmVsZWFzZWQoZXNjcm93X2lkLCBhbW91bnQpYCAoZG9jcy9hZHIvMDAwNSkuIFRoZSBwYXllcgptdXN0IGF1dGhvcml6ZSBjcmVhdGlvbiwgYW5kIHRoZSBwYXllZSBtdXN0IGFsc28gYXV0aG9yaXplIGlmCmBub3RpZnlfcGF5ZWVgIGlzIHRydWUuIGByZWZ1bmRfdG9gIGlzIHRoZSBvcHRpb25hbCByZWZ1bmQKZGVzdGluYXRpb24gZm9yIGEgc3BvbnNvcmVkIGVzY3JvdyB3aGVyZSB0aGUgZnVuZGVyIChgcGF5ZXJgKSBpcwpub3Qgd2hvIHNob3VsZCBnZXQgdGhlIG1vbmV5IGJhY2sgKGRvY3MvYWRyLzAwMDkpOiBgTm9uZWAgbWVhbnMKYHBheWVyYDsgaXQgbWF5IG5vdCBiZSB0aGlzIGNvbnRyYWN0J3Mgb3duIGFkZHJlc3MsIGFuZCB0aGUKYHBheWVyYCdzIGF1dGggb24gdGhpcyBjYWxsIGNvdmVycyBpdC4gRm9yIE0tb2YtTiByZWxlYXNlcnMgdXNlCmBjcmVhdGVfZXNjcm93X3dpdGhfcmVsZWFzZXJzYC4KClRoaXMgaXMgYSBkZXBvc2l0IHBhdGgsIHNvIGl0IGlzIGdhdGVkIGJ5IHRoZSBlbWVyZ2VuY3kgcGF1c2UKKGRvY3MvYWRyLzAwMTEpOiB3aGlsZSBwYXVzZWQgaXQgZmFpbHMgd2l0aCBgUGF1c2VkYCBiZWZvcmUgYW55CmZ1bmRzIG1vdmUsIG5vIGVzY3JvdyBpZCBpcyBjb25zdW1lZCBhbmQgbm90aGluZyBpcyBzdG9yZWQuIFRoZQpzYW1lIGNoZWNrIGNvdmVycyBldmVyeSBjcmVhdGlvbiBlbnRyeSBwb2ludCwgYW5kAAAADWNyZWF0ZV9lc2Nyb3cAAAAAAAAJAAAAAAAAAAVwYXllcgAAAAAAABMAAAAAAAAABXBheWVlAAAAAAAAEwAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAAAAAAADWNvbmRpdGlvbl9yZWYAAAAAAAAQAAAAAAAAAAhyZWxlYXNlcgAAABMAAAAAAAAADHJlZnVuZF9hZnRlcgAAA+gAAAAGAAAAAAAAAAxub3RpZnlfcGF5ZWUAAAABAAAAAAAAAAlyZWZ1bmRfdG8AAAAAAAPoAAAAEwAAAAEAAAPpAAAABgAAAAM=",
+        "AAAAAAAAAPdSZWFkLW9ubHk6IHRoZSBjdXN0b2RpYW4gYWRkcmVzcyB0aGF0IG1heSBgcGF1c2VgL2B1bnBhdXNlYCwgc28KaW50ZWdyYXRvcnMgY2FuIHZlcmlmeSB3aG8gaG9sZHMgdGhlIHJvbGUgd2l0aG91dCB0cnVzdGluZyBkb2NzCihkb2NzL2Fkci8wMDExKS4gYE5vbmVgIG9ubHkgZm9yIGFuIGluc3RhbmNlIGRlcGxveWVkIHdpdGhvdXQgYQpjb25zdHJ1Y3Rvciwgd2hpY2ggdGhpcyBjb250cmFjdCdzIFdBU00gZG9lcyBub3QgYWxsb3cuAAAAAA9nZXRfcGF1c2VfYWRtaW4AAAAAAAAAAAEAAAPoAAAAEw==",
+        "AAAAAAAAAPhSb3RhdGVzIGEgZnVuZGVkIGVzY3JvdydzIHJlbGVhc2VyLiBCb3RoIHRoZSBjdXJyZW50IHJlbGVhc2VyIGFuZApwYXllciBtdXN0IGF1dGhvcml6ZSB0aGUgY2hhbmdlOyB0aGUgcGF5ZXIncyBjb25zZW50IHByZXZlbnRzIGEKY29tcHJvbWlzZWQgcmVsZWFzZXIgZnJvbSBzaWxlbnRseSBhcHBvaW50aW5nIGFuIGF0dGFja2VyLiBUaGUKcmVwbGFjZW1lbnQgY2Fubm90IGJlIHRoZSBjb250cmFjdCBpdHNlbGYgb3IgdGhlIHBheWVlLgAAAA9yb3RhdGVfcmVsZWFzZXIAAAAAAwAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAAAAAAxuZXdfcmVsZWFzZXIAAAATAAAAAQAAA+kAAAACAAAAAw==",
+        "AAAAAAAAASdSZXR1cm5zIHRoZSBlc2Nyb3dlZCBgYW1vdW50YCB0byBgcmVmdW5kX3RvYCBvbiBiZWhhbGYgb2YgYW4gTS1vZi1OCnJlbGVhc2VyIHNldCAoZG9jcy9hZHIvMDAwNykuIFNhbWUgYXBwcm92YWwgcnVsZXMgYXMKYHJlbGVhc2Vfd2l0aF9hcHByb3ZhbHNgLiBUaGUgdGltZW91dCByZWZ1bmQgcGF0aCBpbiBgcmVmdW5kYCBzdGF5cwphdmFpbGFibGUgYXMgd2VsbDogb25jZSBgcmVmdW5kX2FmdGVyYCBwYXNzZXMsIGFueW9uZSBjYW4gcmV0dXJuIHRoZQpmdW5kcyB0byB0aGUgcGF5ZXIgd2l0aG91dCBhcHByb3ZhbHMuAAAAABVyZWZ1bmRfd2l0aF9hcHByb3ZhbHMAAAAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAlhcHByb3ZlcnMAAAAAAAPqAAAAEwAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAZFNb3ZlcyB0aGUgZXNjcm93ZWQgYGFtb3VudGAgdG8gYHBheWVlYCBvbiBiZWhhbGYgb2YgYW4gTS1vZi1OCnJlbGVhc2VyIHNldCAoZG9jcy9hZHIvMDAwNykuIEV2ZXJ5IGFkZHJlc3MgaW4gYGFwcHJvdmVyc2AgbXVzdCBiZSBhCnJlbGVhc2VyLCBhcHBlYXIgYXQgbW9zdCBvbmNlLCBhbmQgYXV0aG9yaXplIHRoaXMgZXhhY3QgaW52b2NhdGlvbjsKYXQgbGVhc3QgYHRocmVzaG9sZGAgZGlzdGluY3QgYXBwcm92ZXJzIGFyZSByZXF1aXJlZC4gQXBwcm92YWxzIGFyZQpub3Qgc3RvcmVkIGJldHdlZW4gY2FsbHMsIHNvIHRoZXJlIGlzIG5vdGhpbmcgdG8gY2xlYXIgb24gc2V0dGxlbWVudAphbmQgbm8gYXBwcm92YWwgdG8gcmVwbGF5IOKAlCBhIHNldHRsZWQgZXNjcm93IGZhaWxzIGBOb3RGdW5kZWRgLgAAAAAAABZyZWxlYXNlX3dpdGhfYXBwcm92YWxzAAAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAlhcHByb3ZlcnMAAAAAAAPqAAAAEwAAAAEAAAPpAAAAAgAAAAM=",
+        "AAAAAAAAAHhDcmVhdGVzIGEgc2luZ2xlLXJlbGVhc2VyIGVzY3JvdyB3aXRoIGFuIG9wdGlvbmFsIGVhcmxpZXN0IHJlbGVhc2UgdGltZS4KUmVsZWFzZSBpcyBhbGxvd2VkIGF0IHRoZSBjb25maWd1cmVkIHRpbWVzdGFtcC4AAAAaY3JlYXRlX2VzY3Jvd19yZWxlYXNlX3RpbWUAAAAAAAoAAAAAAAAABXBheWVyAAAAAAAAEwAAAAAAAAAFcGF5ZWUAAAAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAANY29uZGl0aW9uX3JlZgAAAAAAABAAAAAAAAAACHJlbGVhc2VyAAAAEwAAAAAAAAAMcmVmdW5kX2FmdGVyAAAD6AAAAAYAAAAAAAAADG5vdGlmeV9wYXllZQAAAAEAAAAAAAAACXJlZnVuZF90bwAAAAAAA+gAAAATAAAAAAAAABJyZWxlYXNlX25vdF9iZWZvcmUAAAAAA+gAAAAGAAAAAQAAA+kAAAAGAAAAAw==",
+        "AAAAAAAAAZNTYW1lIGFzIGBjcmVhdGVfZXNjcm93YCwgYnV0IHRoZSBlc2Nyb3cgaXMgc2V0dGxlZCBieSBNLW9mLU4KcmVsZWFzZXJzIGluc3RlYWQgb2Ygb25lIGFkZHJlc3MgKGRvY3MvYWRyLzAwMDcpOiBgdGhyZXNob2xkYApkaXN0aW5jdCBhZGRyZXNzZXMgZnJvbSBgcmVsZWFzZXJzYCBtdXN0IGF1dGhvcml6ZSBhIHNldHRsZW1lbnQuClRoZSBzZXQgaXMgc3RvcmVkIGF0IGNyZWF0aW9uIGFuZCBjYW5ub3QgYmUgY2hhbmdlZCBhZnRlcndhcmRzIOKAlAp0aGVyZSBpcyBubyBhZG1pbiBhbmQgbm8gc2V0dGVyLiBSZWplY3RzIGFuIGVtcHR5IHNldCwgbW9yZSB0aGFuCjEwIHJlbGVhc2VycywgZHVwbGljYXRlIGFkZHJlc3NlcywgYW5kIGEgdGhyZXNob2xkIG9mIDAgb3Igb25lCmxhcmdlciB0aGFuIHRoZSBzZXQuAAAAABxjcmVhdGVfZXNjcm93X3dpdGhfcmVsZWFzZXJzAAAACgAAAAAAAAAFcGF5ZXIAAAAAAAATAAAAAAAAAAVwYXllZQAAAAAAABMAAAAAAAAABXRva2VuAAAAAAAAEwAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAA1jb25kaXRpb25fcmVmAAAAAAAAEAAAAAAAAAAJcmVsZWFzZXJzAAAAAAAD6gAAABMAAAAAAAAACXRocmVzaG9sZAAAAAAAAAQAAAAAAAAADHJlZnVuZF9hZnRlcgAAA+gAAAAGAAAAAAAAAAxub3RpZnlfcGF5ZWUAAAABAAAAAAAAAAlyZWZ1bmRfdG8AAAAAAAPoAAAAEwAAAAEAAAPpAAAABgAAAAM=",
+        "AAAAAAAAAIZDcmVhdGVzIGFuIGVzY3JvdyB3aXRoIGFuIG9wdC1pbiBwYXllZSBhY2NlcHRhbmNlIGdhdGUuIEV4aXN0aW5nCmludGVncmF0aW9ucyBjYW4ga2VlcCB1c2luZyBgY3JlYXRlX2VzY3Jvd2AsIHdoaWNoIGRlZmF1bHRzIHRoaXMgb2ZmLgAAAAAAHWNyZWF0ZV9lc2Nyb3dfd2l0aF9hY2NlcHRhbmNlAAAAAAAACQAAAAAAAAAFcGF5ZXIAAAAAAAATAAAAAAAAAAVwYXllZQAAAAAAABMAAAAAAAAABXRva2VuAAAAAAAAEwAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAA1jb25kaXRpb25fcmVmAAAAAAAAEAAAAAAAAAAIcmVsZWFzZXIAAAATAAAAAAAAAAxyZWZ1bmRfYWZ0ZXIAAAPoAAAABgAAAAAAAAATcmVxdWlyZXNfYWNjZXB0YW5jZQAAAAABAAAAAAAAAAlyZWZ1bmRfdG8AAAAAAAPoAAAAEwAAAAEAAAPpAAAABgAAAAM=" ]),
       options
     )
   }
   public readonly fromJSON = {
     pause: this.txFromJSON<Result<void>>,
+        accept: this.txFromJSON<Result<void>>,
         refund: this.txFromJSON<Result<void>>,
+        top_up: this.txFromJSON<Result<void>>,
         release: this.txFromJSON<Result<void>>,
         unpause: this.txFromJSON<Result<void>>,
         is_paused: this.txFromJSON<boolean>,
         get_escrow: this.txFromJSON<Result<EscrowData>>,
         get_status: this.txFromJSON<Result<EscrowStatus>>,
         create_escrow: this.txFromJSON<Result<u64>>,
-        get_pause_admin: this.txFromJSON<Option<string>>
+        get_pause_admin: this.txFromJSON<Option<string>>,
+        rotate_releaser: this.txFromJSON<Result<void>>,
+        refund_with_approvals: this.txFromJSON<Result<void>>,
+        release_with_approvals: this.txFromJSON<Result<void>>,
+        create_escrow_release_time: this.txFromJSON<Result<u64>>,
+        create_escrow_with_releasers: this.txFromJSON<Result<u64>>,
+        create_escrow_with_acceptance: this.txFromJSON<Result<u64>>
   }
 }
