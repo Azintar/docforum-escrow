@@ -39,6 +39,11 @@ pub const MAX_RELEASERS: u32 = 10;
 /// Maximum `condition_ref` length in bytes (threat model T10, Phase E5).
 pub const MAX_CONDITION_REF_LEN: u32 = 64;
 
+/// Maximum number of items accepted by `create_escrows` / `settle_many`
+/// in a single call. Callers (including the SDK) must chunk larger
+/// inputs — see docs/adr/0005.
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EscrowStatus {
@@ -106,6 +111,18 @@ pub struct EscrowData {
 pub const MAX_FEE_BPS: u32 = 1_000;
 /// 10 000 basis points = 100 %.
 const BASIS_POINTS: i128 = 10_000;
+/// One entry of a `create_escrows` batch. Mirrors the single-escrow
+/// creation parameters minus the batch-wide `payer`.
+#[contracttype]
+#[derive(Clone)]
+pub struct CreateItem {
+    pub payee: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub condition_ref: String,
+    pub releaser: Address,
+    pub refund_after: Option<u64>,
+}
 
 #[contracttype]
 enum DataKey {
@@ -172,6 +189,10 @@ pub enum Error {
     /// contract itself, or an amount that would overflow the fee math —
     /// see docs/adr/0010.
     InvalidFee = 25,
+    /// A batch call was passed more than `MAX_BATCH_SIZE` items — see
+    /// docs/adr/0005. Callers must chunk. Appended at the end so existing
+    /// discriminants keep their on-chain values.
+    BatchTooLarge = 25,
 }
 
 #[contract]
@@ -383,6 +404,47 @@ impl EscrowContract {
         )
     }
 
+    /// Batch version of `create_escrow`. Creates one escrow per item, in
+    /// input order, and returns the new ids in the same order as `items`.
+    /// `payer` authorizes once for the whole call. Fails atomically: if
+    /// any item is invalid (bad amount, past `refund_after`, oversized
+    /// `condition_ref`, short-delivering token) the whole call reverts and
+    /// no escrows are created.
+    ///
+    /// `items.len()` must be `<= MAX_BATCH_SIZE` — see docs/adr/0005.
+    pub fn create_escrows(
+        env: Env,
+        payer: Address,
+        items: Vec<CreateItem>,
+    ) -> Result<Vec<u64>, Error> {
+        if items.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for item in items.iter() {
+            let mut releasers = Vec::new(&env);
+            releasers.push_back(item.releaser.clone());
+            let id = Self::create_escrow_inner(
+                &env,
+                payer.clone(),
+                item.payee.clone(),
+                item.token.clone(),
+                item.amount,
+                item.condition_ref.clone(),
+                releasers,
+                1,
+                item.refund_after,
+                false,
+                false,
+                None,
+                None,
+            )?;
+            ids.push_back(id);
+        }
+        Ok(ids)
+    }
+
     /// Read-only status query. Errors if `escrow_id` doesn't exist.
     pub fn get_status(env: Env, escrow_id: u64) -> Result<EscrowStatus, Error> {
         let data: EscrowData = env
@@ -529,6 +591,31 @@ impl EscrowContract {
         Self::check_funded(&data)?;
 
         Self::settle(&env, escrow_id, &mut data, EscrowStatus::Released)
+    }
+
+    /// Batch version of `release`: releases each escrow in `escrow_ids` in
+    /// order on behalf of `caller`, which must be a releaser of every one
+    /// of them. Returns a per-op result vector aligned with `escrow_ids`:
+    /// `Ok(())` for a successful release, `Err(e)` for one the contract
+    /// rejected (unknown id, not funded, caller not a releaser, before
+    /// `release_not_before`). A rejected op does not stop the rest — the
+    /// caller can inspect the vector and retry only the failures.
+    ///
+    /// `escrow_ids.len()` must be `<= MAX_BATCH_SIZE` — see docs/adr/0005.
+    pub fn settle_many(
+        env: Env,
+        caller: Address,
+        escrow_ids: Vec<u64>,
+    ) -> Result<Vec<Result<(), Error>>, Error> {
+        if escrow_ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut results: Vec<Result<(), Error>> = Vec::new(&env);
+        for escrow_id in escrow_ids.iter() {
+            results.push_back(Self::release(env.clone(), escrow_id, caller.clone()));
+        }
+        Ok(results)
     }
 
     /// Returns the escrowed `amount` to the escrow's `refund_to` (the
