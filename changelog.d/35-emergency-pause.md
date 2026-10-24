@@ -1,8 +1,10 @@
 Issue #35 (Phase E5): deposit-only emergency pause. The contract's
 `__constructor` now also takes a `pause_admin` address; only that custodian
 can call `pause`/`unpause`, and while paused every deposit path fails with
-`Paused` before any funds move (26/27/28 are the new append-only error
-codes). `release`, `refund` and the timeout refund never read the flag, so a
+`Paused` before any funds move — including pooled `create_pooled_escrow`
+and `contribute` (35/36/37 are the new append-only error codes, after the
+pooled-escrow errors). `release`, `refund`, the timeout refund and pooled
+`claim_refund` never read the flag, so a
 pause can stop new exposure but never lock escrowed funds (invariant I7,
 threat model T12, `docs/adr/0011`). The SDK gains `pause`/`unpause`/
 `isPaused`/`getPauseAdmin` (minor changeset) and regenerated bindings. This

@@ -1280,6 +1280,9 @@ export class EscrowClient {
       () => client.get_pause_admin(),
     );
     return tx.result ?? undefined;
+  }
+
+  /**
    * Simulates a `release`, has the releaser sign only its short-lived contract
    * authorization entry, and returns the resulting transaction for a separate
    * relayer to sign and submit. The relayer is the transaction source, so it

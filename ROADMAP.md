@@ -227,17 +227,19 @@ An opt-in creation method can require the payee to authorize `accept` before rel
   `docs/adr/0011`: one `pause_admin` address fixed at deployment by
   `__constructor(allowed_tokens, pause_admin)`, which may `pause`/`unpause`
   a flag that blocks **every deposit path** — `create_escrow` and its
-  variants (they share `create_escrow_inner`) plus `top_up` — and nothing
-  else. `release`, `refund` and the timeout refund never read it, so a
+  variants (they share `create_escrow_inner`), `top_up`, and the pooled
+  `create_pooled_escrow`/`contribute` — and nothing else. `release`,
+  `refund`, the timeout refund and pooled `claim_refund` never read it, so a
   pause can never lock existing funds (invariant I7, threat model T12).
   Alternatives rejected in the ADR: permissionless pause (trivial
   griefing), auto-expiring pause (silently lapses mid-incident), token
   allowlist (a different problem), and doing nothing. New append-only error
-  codes `Paused = 26`, `AlreadyPaused = 27`, `NotPaused = 28`;
-  `Paused`/`Unpaused` events carry the custodian. 17 tests in
+  codes `Paused = 35`, `AlreadyPaused = 36`, `NotPaused = 37`;
+  `Paused`/`Unpaused` events carry the custodian. 20 tests in
   `contracts/escrow/tests/pause.rs`, including release, releaser refund,
   stranger timeout refund, and release-after-deadline while paused, plus a
-  year-long pause leaving nothing stuck and `top_up` blocked. SDK minor
+  year-long pause leaving nothing stuck, `top_up` blocked, and pooled
+  contributions blocked while pooled claims and releases still pay out. SDK minor
   changeset with `pause`/`unpause`/`isPaused`/`getPauseAdmin` and
   regenerated bindings. Not yet redeployed to testnet — the current
   deployment predates the constructor and cannot pause.

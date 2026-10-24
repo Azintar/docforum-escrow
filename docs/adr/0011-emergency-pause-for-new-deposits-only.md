@@ -125,10 +125,14 @@ Option 1.
    an event never claims a transition that didn't happen.
 3. **Scope: new deposits only.** Every creation entry point funnels through
    `create_escrow_inner`, which checks the flag first and returns the new
-   `Error::Paused` (26) without pulling funds, without consuming an escrow
+   `Error::Paused` (35) without pulling funds, without consuming an escrow
    id, and without writing an escrow. `top_up` — a deposit path added after
    this ADR was first written — applies the same check before its transfer,
    exactly as the ADR originally required of any future deposit path.
+   Pooled escrows (docs/adr/0011-pooled-escrow-funding.md) are gated the
+   same way: `create_pooled_escrow` and `contribute` return `Paused` while
+   the flag is set, and pull-based `claim_refund` never reads it, so a
+   failed pooled round can always be refunded.
    `release`, `refund` (both the releaser path and the ADR 0004 timeout
    path), `get_status`, `get_escrow` and `is_paused` never read the flag.
 4. **How to unpause.** The same custodian calls `unpause`. No timelock on
@@ -174,10 +178,12 @@ the deadline.
   keys (`PauseAdmin`, `Paused`) are added. Existing escrow entries are
   unaffected — and there is no migration to worry about, because a
   redeploy is a new contract id by definition.
-- **New error codes**: `Paused = 26`, `AlreadyPaused = 27`, `NotPaused = 28`.
+- **New error codes**: `Paused = 35`, `AlreadyPaused = 36`, `NotPaused = 37`.
   Every existing code keeps its number, because consumers map codes, not
-  names. 26–28 are reserved here even though the protocol-fee ADR takes 25,
-  so the two changes can land in either order without colliding.
+  names. They were originally reserved as 26–28, but batch settlement
+  (`BatchTooLarge = 25`) and pooled escrows (`NotPooled` through
+  `InvalidFundingDeadline`, 26–34) landed on `main` first, so the pause
+  codes were appended after them.
 - **New public functions**: `pause`, `unpause`, `is_paused`,
   `get_pause_admin`, plus the constructor. Additive but a real surface
   change: SDK bindings must be regenerated and the SDK minor-bumped by

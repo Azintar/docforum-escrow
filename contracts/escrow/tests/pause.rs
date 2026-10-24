@@ -5,10 +5,12 @@
 // The review criterion for this feature is a negative one: **every**
 // outbound-funds path must be provably unaffected by the pause. So this
 // file tests both halves:
-//   - paused blocks every deposit path (`create_escrow`, its variants and
-//     `top_up`) and locks nothing while doing so;
-//   - paused does NOT block `release`, `refund`, or the ADR 0004 timeout
-//     refund — including release after the deadline and a long pause.
+//   - paused blocks every deposit path (`create_escrow`, its variants,
+//     `top_up`, `create_pooled_escrow` and `contribute`) and locks nothing
+//     while doing so;
+//   - paused does NOT block `release`, `refund`, the ADR 0004 timeout
+//     refund or pooled `claim_refund` — including release after the
+//     deadline and a long pause.
 // plus the role itself (custodian set at deploy, its auth, events, and
 // pause/unpause state errors).
 
@@ -479,4 +481,92 @@ fn a_settled_escrow_cannot_be_paid_twice_just_because_the_contract_is_paused() {
     );
     assert_eq!(f.token.balance(&f.payee), 300);
     assert_eq!(f.token.balance(&f.contract_id), 0);
+}
+
+// --- pooled escrows (issue #113): same rule, new entry points ---
+//
+// `create_pooled_escrow` and `contribute` are deposit paths, so the pause
+// blocks them. Pull-based `claim_refund` and `release` move money *out*,
+// so a pause must never stop a failed round's refunds or a met target's
+// payout.
+
+/// Funding deadline for the pooled tests — strictly after CREATED_AT.
+const FUNDING_DEADLINE: u64 = 1_500;
+
+fn create_pooled(env: &Env, f: &Fixture, target: i128) -> u64 {
+    f.client.create_pooled_escrow(
+        &f.payer,
+        &f.payee,
+        &f.token_id,
+        &target,
+        &String::from_str(env, "pooled-condition"),
+        &f.releaser,
+        &FUNDING_DEADLINE,
+    )
+}
+
+#[test]
+fn paused_blocks_pooled_creation_and_contributions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let pooled_id = create_pooled(&env, &f, 500);
+    f.client.pause(&f.custodian);
+
+    assert_contract_error(
+        f.client.try_create_pooled_escrow(
+            &f.payer,
+            &f.payee,
+            &f.token_id,
+            &500,
+            &String::from_str(&env, "blocked-pooled"),
+            &f.releaser,
+            &FUNDING_DEADLINE,
+        ),
+        Error::Paused,
+    );
+    assert_contract_error(
+        f.client.try_contribute(&pooled_id, &f.payer, &100),
+        Error::Paused,
+    );
+
+    // Nothing moved and nothing was recorded.
+    assert_eq!(f.token.balance(&f.payer), 1_000);
+    assert_eq!(f.token.balance(&f.contract_id), 0);
+    assert_eq!(f.client.get_contribution(&pooled_id, &f.payer), None);
+
+    // The rejected creation consumed no id.
+    f.client.unpause(&f.custodian);
+    assert_eq!(create(&env, &f, 100, None), pooled_id + 1);
+}
+
+#[test]
+fn pooled_claim_refund_still_works_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let pooled_id = create_pooled(&env, &f, 500);
+    f.client.contribute(&pooled_id, &f.payer, &200);
+
+    f.client.pause(&f.custodian);
+    env.ledger().set_timestamp(FUNDING_DEADLINE);
+    f.client.claim_refund(&pooled_id, &f.payer);
+
+    assert_eq!(f.token.balance(&f.payer), 1_000);
+    assert_eq!(f.token.balance(&f.contract_id), 0);
+}
+
+#[test]
+fn fully_funded_pooled_escrow_still_releases_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let pooled_id = create_pooled(&env, &f, 500);
+    f.client.contribute(&pooled_id, &f.payer, &500);
+
+    f.client.pause(&f.custodian);
+    f.client.release(&pooled_id, &f.releaser);
+
+    assert_eq!(f.token.balance(&f.payee), 500);
+    assert_eq!(f.client.get_status(&pooled_id), EscrowStatus::Released);
 }

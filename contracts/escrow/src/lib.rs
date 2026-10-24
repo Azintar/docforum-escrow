@@ -16,9 +16,10 @@
 // and behave exactly as before.
 // Phase E5 (issue #35): a narrow emergency pause — see docs/adr/0011. One
 // address set at deploy may flip a flag that blocks NEW deposits
-// (`create_escrow`, `create_escrow_release_time`, `create_escrow_with_*`
-// and `top_up`) only. `release`, `refund` and the timeout refund never
-// read it: a pause can stop new exposure, never lock existing funds.
+// (`create_escrow`, `create_escrow_release_time`, `create_escrow_with_*`,
+// `create_pooled_escrow`, `top_up` and `contribute`) only. `release`,
+// `refund`, the timeout refund and `claim_refund` never read it: a pause
+// can stop new exposure, never lock existing funds.
 // Phase E5 (issue #113): pooled escrows funded by multiple payers —
 // `create_pooled_escrow` + `contribute` + pull-based `claim_refund`, see
 // docs/adr/0011. Pooled escrows add two storage records (funding config,
@@ -156,6 +157,12 @@ enum DataKey {
     /// The emergency-pause flag. Absent/false = normal operation; only the
     /// deposit entry points read it (docs/adr/0011).
     Paused,
+    /// Pooled escrows only (issue #113): immutable funding config.
+    /// Soroban encodes enum variants by name, so appending these two
+    /// variants does not disturb any existing storage entry.
+    Pooled(u64),
+    /// Pooled escrows only (issue #113): one record per contributor.
+    Contribution(u64, Address),
 }
 
 /// Emitted by `pause` (docs/adr/0011). Carries the custodian that flipped
@@ -173,12 +180,6 @@ pub struct Paused {
 pub struct Unpaused {
     #[topic]
     pub admin: Address,
-    /// Pooled escrows only (issue #113): immutable funding config.
-    /// Soroban encodes enum variants by name, so appending these two
-    /// variants does not disturb any existing storage entry.
-    Pooled(u64),
-    /// Pooled escrows only (issue #113): one record per contributor.
-    Contribution(u64, Address),
 }
 
 #[contracterror]
@@ -234,16 +235,6 @@ pub enum Error {
     InvalidReleaseNotBefore = 22,
     /// Release was attempted before the configured time.
     ReleaseTooEarly = 23,
-    /// New deposits are blocked: the contract is paused (docs/adr/0011).
-    /// Only deposit paths return this — every outbound path (`release`,
-    /// `refund`, timeout refund) is unaffected by the pause.
-    Paused = 26,
-    /// `pause` called while the contract is already paused — a no-op is
-    /// rejected rather than emitting an event for a transition that
-    /// didn't happen (docs/adr/0011).
-    AlreadyPaused = 27,
-    /// `unpause` called while the contract is not paused (docs/adr/0011).
-    NotPaused = 28,
     /// A batch call was passed more than `MAX_BATCH_SIZE` items — see
     /// docs/adr/0005. Callers must chunk. Appended at the end so existing
     /// discriminants keep their on-chain values.
@@ -277,6 +268,18 @@ pub enum Error {
     NotSupportedForPooled = 33,
     /// The funding deadline was not strictly in the future at creation.
     InvalidFundingDeadline = 34,
+    /// New deposits are blocked: the contract is paused (docs/adr/0011).
+    /// Only deposit paths return this — every outbound path (`release`,
+    /// `refund`, timeout refund, pooled `claim_refund`) is unaffected by
+    /// the pause. Appended after the pooled-escrow errors so every
+    /// existing discriminant keeps its on-chain value.
+    Paused = 35,
+    /// `pause` called while the contract is already paused — a no-op is
+    /// rejected rather than emitting an event for a transition that
+    /// didn't happen (docs/adr/0011).
+    AlreadyPaused = 36,
+    /// `unpause` called while the contract is not paused (docs/adr/0011).
+    NotPaused = 37,
 }
 
 #[contract]
@@ -577,6 +580,13 @@ impl EscrowContract {
         releaser: Address,
         funding_deadline: u64,
     ) -> Result<u64, Error> {
+        // Creating a pooled escrow opens a new deposit target, so the
+        // emergency pause gates it like every other creation entry point
+        // (docs/adr/0011): while paused no id is consumed and nothing is
+        // stored.
+        if Self::is_paused(env.clone()) {
+            return Err(Error::Paused);
+        }
         // Validate everything before any auth prompt so a malformed
         // request costs the caller nothing on-chain (same convention as
         // `create_escrow_inner`).
@@ -660,6 +670,12 @@ impl EscrowContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
+        // `contribute` is how new money enters a pooled escrow, so the
+        // emergency pause blocks it (docs/adr/0011). `claim_refund` and
+        // `release` never read the flag: a pause cannot trap pooled funds.
+        if Self::is_paused(env.clone()) {
+            return Err(Error::Paused);
+        }
         let mut data: EscrowData = Self::load(&env, escrow_id)?;
         let pooled = Self::pooled_data(&env, escrow_id)?;
         Self::check_funded(&data)?;
@@ -678,15 +694,18 @@ impl EscrowContract {
         Self::transfer_in_exact(&env, &data.token, &payer, amount)?;
 
         let key = DataKey::Contribution(escrow_id, payer.clone());
-        let mut contribution: Contribution = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Contribution {
-                amount: 0,
-                refunded: false,
-            });
-        contribution.amount = contribution.amount.checked_add(amount).ok_or(Error::Overflow)?;
+        let mut contribution: Contribution =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(Contribution {
+                    amount: 0,
+                    refunded: false,
+                });
+        contribution.amount = contribution
+            .amount
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
         let funded = data.amount.checked_add(amount).ok_or(Error::Overflow)?;
         data.amount = funded;
         env.storage().persistent().set(&key, &contribution);
@@ -713,11 +732,7 @@ impl EscrowContract {
     /// change anyone's entitlement. Checks-effects-interactions: the
     /// `refunded` flag and the pooled total are written before the
     /// transfer, and a failing transfer rolls the whole claim back.
-    pub fn claim_refund(
-        env: Env,
-        escrow_id: u64,
-        contributor: Address,
-    ) -> Result<(), Error> {
+    pub fn claim_refund(env: Env, escrow_id: u64, contributor: Address) -> Result<(), Error> {
         contributor.require_auth();
 
         let mut data: EscrowData = Self::load(&env, escrow_id)?;
@@ -746,7 +761,10 @@ impl EscrowContract {
         // the pooled total first, so a failed transfer rolls back
         // atomically and can never double-pay (invariant I3).
         contribution.refunded = true;
-        data.amount = data.amount.checked_sub(refund_amount).ok_or(Error::Overflow)?;
+        data.amount = data
+            .amount
+            .checked_sub(refund_amount)
+            .ok_or(Error::Overflow)?;
         env.storage().persistent().set(&key, &contribution);
         env.storage()
             .persistent()
@@ -1318,11 +1336,7 @@ impl EscrowContract {
     /// (push `refund`, `refund_with_approvals`, `cancel`, `top_up` — see
     /// docs/adr/0011 for why each would break per-contributor accounting).
     fn reject_pooled(env: &Env, escrow_id: u64) -> Result<(), Error> {
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::Pooled(escrow_id))
-        {
+        if env.storage().persistent().has(&DataKey::Pooled(escrow_id)) {
             return Err(Error::NotSupportedForPooled);
         }
         Ok(())
@@ -1360,15 +1374,16 @@ impl EscrowContract {
         false
     }
 
-    /// Blocks new deposits (`create_escrow` and its variants, plus
-    /// `top_up`) until `unpause` is called. Callable only by the custodian
+    /// Blocks new deposits (`create_escrow` and its variants,
+    /// `create_pooled_escrow`, `top_up` and `contribute`) until `unpause`
+    /// is called. Callable only by the custodian
     /// set at deployment, which must sign this call (docs/adr/0011). Emits
     /// a `Paused` event carrying that address.
     ///
     /// Deliberately has no effect on money already escrowed: `release`,
-    /// `refund` and the timeout refund do not read the flag, so a pause can
-    /// never lock existing funds. Errors `AlreadyPaused` if the contract is
-    /// already paused.
+    /// `refund`, the timeout refund and `claim_refund` do not read the
+    /// flag, so a pause can never lock existing funds. Errors
+    /// `AlreadyPaused` if the contract is already paused.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         Self::require_pause_admin(&env, &caller)?;
