@@ -226,11 +226,6 @@ pub enum Error {
     InvalidReleaseNotBefore = 22,
     /// Release was attempted before the configured time.
     ReleaseTooEarly = 23,
-    /// The optional protocol fee was misconfigured at creation: `bps`
-    /// above [`MAX_FEE_BPS`] (10 %), a recipient equal to the escrow
-    /// contract itself, or an amount that would overflow the fee math —
-    /// see docs/adr/0010.
-    InvalidFee = 25,
     /// A batch call was passed more than `MAX_BATCH_SIZE` items — see
     /// docs/adr/0005. Callers must chunk. Appended at the end so existing
     /// discriminants keep their on-chain values.
@@ -264,6 +259,11 @@ pub enum Error {
     NotSupportedForPooled = 33,
     /// The funding deadline was not strictly in the future at creation.
     InvalidFundingDeadline = 34,
+    /// The optional protocol fee was misconfigured at creation: `bps`
+    /// above [`MAX_FEE_BPS`] (10 %), a recipient equal to the escrow
+    /// contract itself, or an amount that would overflow the fee math —
+    /// see docs/adr/0010.
+    InvalidFee = 35,
 }
 
 #[contract]
@@ -510,6 +510,8 @@ impl EscrowContract {
                 false,
                 None,
                 None,
+                None,
+                None,
             )?;
             ids.push_back(id);
         }
@@ -612,6 +614,11 @@ impl EscrowContract {
             // contributor. Stored so every `EscrowData` invariant holds.
             refund_to: creator,
             release_not_before: None,
+            // Pooled escrows carry no protocol fee (docs/adr/0010 is
+            // creation-time only via `create_escrow*`): release pays the
+            // pooled total to the payee in full.
+            fee_recipient: None,
+            fee_bps: None,
         };
         env.storage().persistent().set(&DataKey::Escrow(id), &data);
         env.storage().persistent().set(

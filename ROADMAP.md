@@ -235,8 +235,8 @@ An opt-in creation method can require the payee to authorize `accept` before rel
   `create_escrow` and `create_escrow_release_time` take the pair; the
   acceptance and M-of-N entry points remain fee-free. `top_up` grows the
   escrowed amount and therefore the bps fee, re-checking the fee math
-  before its transfer. New append-only `Error::InvalidFee = 25`, new
-  invariant I6, 17 tests in `tests/protocol_fee.rs`. Breaking read shape
+  before its transfer. New append-only `Error::InvalidFee = 35`, new
+  invariant I7, 17 tests in `tests/protocol_fee.rs`. Breaking read shape
   and creation signature → SDK minor changeset and regenerated bindings.
   **Not yet on testnet** — the live deployment predates the fee.
 - [x] **Pooled escrows funded by multiple payers** (issue #113) —

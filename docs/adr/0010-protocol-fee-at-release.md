@@ -66,11 +66,13 @@ a half-pair because creation is the only writer.
 
 Basis points: 10 000 bps = 100 %. The cap is a contract constant
 (`MAX_FEE_BPS = 1_000`), enforced at creation with the new
-`Error::InvalidFee = 25` (the next unused code on top of the current
-surface; every existing code keeps its number because consumers map codes,
-not names — the 2026-10-08 `#17`/`#18` merge incident is the standing
-warning). The code is reserved here even while the pause ADR reserves
-26–28, so the two changes cannot collide when they land in either order.
+`Error::InvalidFee = 35` (the next unused code on top of the current
+surface, after batch creation's `BatchTooLarge = 25` and the pooled-escrow
+codes 26–34 from docs/adr/0011; every existing code keeps its number because
+consumers map codes, not names — the 2026-10-08 `#17`/`#18` merge incident
+is the standing warning). This change originally proposed 25 and was
+renumbered when it was merged with those features, rather than moving any
+code already on `main`.
 
 `bps = 0` with a set recipient is accepted, not rejected: it lets an
 integrator declare a fee slot that currently takes nothing (e.g. a
@@ -160,7 +162,7 @@ integrators will look.
 
 ## Invariant added (companion to I1)
 
-**I6 (fee conservation):** exactly once per escrow's lifetime, at release,
+**I7 (fee conservation):** exactly once per escrow's lifetime, at release,
 and only if a fee was declared at that same escrow's creation: the fee
 transfer's amount is `⌊amount × fee_bps ÷ 10 000⌋` (≤ 10 % of `amount`),
 its destination is exactly the `fee_recipient` fixed at creation, and
@@ -198,6 +200,6 @@ and no fee can be introduced, changed, or removed after creation.
   applies, with the cap enforced on-chain; 3. read
   `getEscrow(...).feeRecipient` / `.feeBps` where the UI should show the
   platform's cut.
-- **New error code**: `Error::InvalidFee = 25`.
+- **New error code**: `Error::InvalidFee = 35`.
 - The redeployment is testnet-only and needs the Phase E4 security
   review *before* any mainnet use (hard rule 4 unchanged).

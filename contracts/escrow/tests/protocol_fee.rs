@@ -6,7 +6,7 @@
 // each:
 //   - fee (recipient + bps) taken at release, remainder to the payee;
 //     the two transfers always sum to exactly the stored `amount` (the
-//     reviewer's check; invariant I6, ADR 0010 decisions 4 and 7).
+//     reviewer's check; invariant I7, ADR 0010 decisions 4 and 7).
 //   - fee rounded down; remainder stays with the payee (decision 3) —
 //     including rounding all the way to zero for tiny amounts.
 //   - bps capped at MAX_FEE_BPS = 1 000 (10 %); bps = 0 allowed

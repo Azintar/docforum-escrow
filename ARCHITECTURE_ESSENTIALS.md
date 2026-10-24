@@ -17,10 +17,8 @@ create_escrow_with_acceptance(..., requires_acceptance, refund_to) -> escrow_id 
 accept(escrow_id, payee) -> ()   // payee-authorized, one-time acceptance before release; deployed on testnet
 cancel(escrow_id, payer) -> ()   // payer-authorized, only while Funded + requires_acceptance + not yet accepted; funds to refund_to, status Cancelled (ADR 0010); not deployed yet
 create_escrow_with_releasers(payer, payee, token, amount, condition_ref, releasers, threshold, refund_after, notify_payee, refund_to) -> escrow_id // IMPLEMENTED (Phase E5, issue #119, ADR 0007) — M-of-N, deployed on testnet
-get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded — IMPLEMENTED + LIVE ON TESTNET (Phase E1)
-get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releasers, threshold, refund_after, refund_to, fee_recipient, fee_bps — IMPLEMENTED (Phase E4 + E5; `releaser` became `releasers`+`threshold` in #119)
 get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded | Cancelled — IMPLEMENTED + LIVE ON TESTNET (Phase E1)
-get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releasers, threshold, refund_after, refund_to — IMPLEMENTED (Phase E4 + E5; `releaser` became `releasers`+`threshold` in #119)
+get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releasers, threshold, refund_after, refund_to, fee_recipient, fee_bps — IMPLEMENTED (Phase E4 + E5; `releaser` became `releasers`+`threshold` in #119)
 release(escrow_id, caller) -> result   // IMPLEMENTED (Phase E2) — a releaser, threshold must be 1, only while Funded
 release_with_approvals(escrow_id, approvers) -> result   // IMPLEMENTED (Phase E5, issue #119, ADR 0007) — >= threshold distinct releasers, each authorizing this invocation
 refund(escrow_id, caller) -> result    // IMPLEMENTED (Phase E2 + E4) — a releaser when threshold is 1; anyone too, once refund_after has passed, and then still only to the stored `refund_to` (= payer unless set at creation, ADR 0009)
@@ -115,7 +113,7 @@ set once at creation, taken **off the top** at `release` —
 to `refund_to`. `fee_bps` is capped at `MAX_FEE_BPS` = 1 000 (10 %) with
 floor rounding; `fee_recipient` must not be the contract itself; both
 params must be given together or both omitted, or creation fails with
-`InvalidFee` (error 25). `create_escrow` and `create_escrow_release_time`
+`InvalidFee` (error 35). `create_escrow` and `create_escrow_release_time`
 take the pair; the acceptance and M-of-N entry points record no fee. A
 `top_up` grows the stored `amount`, so it grows the bps fee (the fee math
 is re-checked before the top-up transfer). Both fields are readable from

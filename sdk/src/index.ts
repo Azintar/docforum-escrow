@@ -234,10 +234,8 @@ export class MilestoneScheduleError extends Error {
  * change is an SDK semver event (hard rule 3).
  */
 export const MAX_FEE_BPS = 1_000;
- * Maximum number of items in one batched call — must match the contract's
- * `MAX_BATCH_SIZE` (currently 50, see docs/adr/0005). `createEscrows` and
- * `settleMany` chunk larger inputs automatically. Keep in sync with the
- * contract; a change is an SDK semver event (hard rule 3).
+
+/**
  * `amount` must be positive, the schedule non-empty, every tranche positive,
  * the sum exactly `amount`, and every value representable as an `i128`.
  * Pure and synchronous: a malformed schedule is a programmer error, not a
