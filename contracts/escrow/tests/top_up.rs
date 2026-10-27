@@ -42,6 +42,8 @@ fn setup(env: &Env) -> Fixture<'_> {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
     Fixture {
         client,

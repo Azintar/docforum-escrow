@@ -89,6 +89,8 @@ fn create(env: &Env, f: &Fixture, amount: i128, refund_after: Option<u64>) -> u6
         &refund_after,
         &false,
         &None,
+        &None,
+        &None,
     )
 }
 
@@ -256,6 +258,8 @@ fn paused_create_escrow_fails_with_paused_and_locks_no_funds() {
             &None,
             &false,
             &None,
+            &None,
+            &None,
         ),
         Error::Paused,
     );
@@ -339,6 +343,8 @@ fn paused_rejections_do_not_consume_escrow_ids() {
                 &f.releaser,
                 &None,
                 &false,
+                &None,
+                &None,
                 &None,
             )
             .is_err());

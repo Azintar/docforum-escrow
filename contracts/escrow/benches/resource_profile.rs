@@ -46,6 +46,8 @@ impl Fixture<'_> {
             &None,
             &false,
             &None,
+            &None,
+            &None,
         )
     }
 }
@@ -69,7 +71,7 @@ fn main() {
         f.client.create_escrow_release_time(
             &f.payer, &f.payee, &f.token, &100,
             &String::from_str(&f.env, "resource-profile"), &f.releaser,
-            &None, &false, &None, &Some(1_000),
+            &None, &false, &None, &Some(1_000), &None, &None,
         );
     });
 

@@ -493,6 +493,8 @@ fn single_releaser_escrow_behaves_as_a_one_of_one_quorum() {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
     let data = client.get_escrow(&first);
     assert_eq!(data.threshold, 1);
@@ -513,6 +515,8 @@ fn single_releaser_escrow_behaves_as_a_one_of_one_quorum() {
         &releaser,
         &None,
         &false,
+        &None,
+        &None,
         &None,
     );
     let mut approvers = Vec::new(&env);

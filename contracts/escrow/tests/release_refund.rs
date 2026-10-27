@@ -53,6 +53,8 @@ fn fund_escrow(env: &Env, amount: i128) -> Fixture<'_> {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
 
     Fixture {

@@ -214,6 +214,8 @@ fn create_escrow_rejects_lying_transfer() {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
 
     assert_eq!(result, Err(Ok(Error::BalanceMismatch)));
@@ -252,6 +254,8 @@ fn create_escrow_rejects_short_delivery() {
         &releaser,
         &None,
         &false,
+        &None,
+        &None,
         &None,
     );
 
@@ -296,6 +300,8 @@ fn failed_payout_leaves_the_escrow_funded() {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
 
     token.arm();
@@ -336,6 +342,8 @@ fn reentrant_transfer_cannot_double_release() {
         &releaser,
         &None,
         &false,
+        &None,
+        &None,
         &None,
     );
     assert_eq!(token.balance(&contract_id), 300);

@@ -768,6 +768,8 @@ fn ordinary_escrows_are_unaffected() {
         &None,
         &false,
         &None,
+        &None,
+        &None,
     );
 
     // The pooled-only entry points refuse an ordinary escrow.
@@ -805,6 +807,8 @@ fn ordinary_escrows_are_unaffected() {
         &releaser,
         &None,
         &false,
+        &None,
+        &None,
         &None,
     );
     client.refund(&id2, &releaser);

@@ -55,6 +55,8 @@ fn setup<'a>(env: &Env, release_at: Option<u64>, refund_at: Option<u64>) -> Fixt
         &false,
         &None,
         &release_at,
+        &None,
+        &None,
     );
 
     Fixture {
@@ -133,6 +135,8 @@ fn creation_rejects_release_time_in_the_past_or_after_refund_deadline() {
         &false,
         &None,
         &Some(CREATED_AT - 1),
+        &None,
+        &None,
     );
     let after_refund = client.try_create_escrow_release_time(
         &payer,
@@ -145,6 +149,8 @@ fn creation_rejects_release_time_in_the_past_or_after_refund_deadline() {
         &false,
         &None,
         &Some(REFUND_AT + 1),
+        &None,
+        &None,
     );
 
     assert_eq!(past, Err(Ok(Error::InvalidReleaseNotBefore)));
