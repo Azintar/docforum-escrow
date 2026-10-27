@@ -344,9 +344,15 @@ fn settle_many_subtracts_each_release() {
     let b = f.create(0, 20);
     f.create(1, 30);
     // One id per call; see `creation_paths_add_to_liabilities` for why.
-    f.client.settle_many(&f.releaser, &soroban_sdk::vec![&env, (a, SettleAction::Release)]);
+    f.client.settle_many(
+        &f.releaser,
+        &soroban_sdk::vec![&env, (a, SettleAction::Release)],
+    );
     assert_eq!(f.liabilities(0), 20);
-    f.client.settle_many(&f.releaser, &soroban_sdk::vec![&env, (b, SettleAction::Release)]);
+    f.client.settle_many(
+        &f.releaser,
+        &soroban_sdk::vec![&env, (b, SettleAction::Release)],
+    );
     assert_eq!(f.liabilities(0), 0);
     assert_eq!(f.liabilities(1), 30);
     f.assert_invariant();
@@ -713,7 +719,10 @@ fn apply(f: &Fixture, op: Op) {
         }
         Op::SettleMany { pick } => {
             if let Some(id) = existing_id(f, pick) {
-                let _ = f.client.try_settle_many(&f.releaser, &soroban_sdk::vec![env, (id, SettleAction::Release)]);
+                let _ = f.client.try_settle_many(
+                    &f.releaser,
+                    &soroban_sdk::vec![env, (id, SettleAction::Release)],
+                );
             }
         }
         Op::Refund { pick, stranger } => {

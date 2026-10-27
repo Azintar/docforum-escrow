@@ -18,9 +18,8 @@
 // address set at deploy may flip a flag that blocks NEW deposits
 // (`create_escrow`, `create_escrow_release_time`, `create_escrow_with_*`,
 // `create_pooled_escrow`, `top_up` and `contribute`) only. `release`,
-// `refund`, the timeout refund and `claim_refund` never read it: a pause
-// can stop new exposure, never lock existing funds.
-//
+// `refund`, the timeout refund, `claim_refund` and `settle_many` never read
+// it: a pause can stop new exposure, never lock existing funds.
 // Phase E5 (issue #29): `settle_many(caller, ops)` settles up to
 // `MAX_SETTLE_OPS` escrows (release or refund each) in one transaction,
 // best-effort with per-op results — see docs/adr/0012 and threat model T1.
@@ -53,13 +52,12 @@
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
-    symbol_short, token,
-    Address, Env, IntoVal, String, Vec,
+    symbol_short, token, Address, Env, IntoVal, String, Vec,
 };
 
 // Bump this value whenever a contract interface or behavior change is made.
 // CI checks this constant against the base branch when this file changes.
-pub const CONTRACT_VERSION: &str = "2.2.0";
+pub const CONTRACT_VERSION: &str = "2.3.0";
 
 include!(concat!(env!("OUT_DIR"), "/contract_metadata.rs"));
 
@@ -1114,6 +1112,10 @@ impl EscrowContract {
     ///
     /// `ops.len()` must be `<= MAX_SETTLE_OPS` (`BatchTooLarge`). An empty
     /// batch returns an empty vector.
+    ///
+    /// Deliberately **not** gated by the emergency pause (docs/adr/0011):
+    /// both ops are outbound, exactly like single `release`/`refund`, and a
+    /// pause stops new deposits only — it must never block funds leaving.
     pub fn settle_many(
         env: Env,
         caller: Address,

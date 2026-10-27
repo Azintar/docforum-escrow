@@ -9,13 +9,13 @@
 //     `top_up`, `create_pooled_escrow` and `contribute`) and locks nothing
 //     while doing so;
 //   - paused does NOT block `release`, `refund`, the ADR 0004 timeout
-//     refund or pooled `claim_refund` — including release after the
-//     deadline and a long pause.
+//     refund, pooled `claim_refund` or either `settle_many` op (release
+//     and refund) — including release after the deadline and a long pause.
 // plus the role itself (custodian set at deploy, its auth, events, and
 // pause/unpause state errors).
 
 use docforum_escrow::{
-    Error, EscrowContract, EscrowContractClient, EscrowStatus, Paused, Unpaused,
+    Error, EscrowContract, EscrowContractClient, EscrowStatus, Paused, SettleAction, Unpaused,
 };
 use soroban_sdk::{
     events::Event as _,
@@ -419,6 +419,75 @@ fn releaser_can_still_release_after_the_deadline_while_paused() {
 
     assert_eq!(f.token.balance(&f.payee), 300);
     assert_eq!(f.client.get_status(&escrow_id), EscrowStatus::Released);
+}
+
+// `settle_many` (issue #29) is an outbound path too: its release and refund
+// ops follow the same pause rule as single `release`/`refund` and must keep
+// working while paused (docs/adr/0011, invariant I8).
+
+#[test]
+fn settle_many_release_still_pays_the_payee_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let escrow_id = create(&env, &f, 300, None);
+
+    f.client.pause(&f.custodian);
+    let results = f.client.settle_many(
+        &f.releaser,
+        &soroban_sdk::vec![&env, (escrow_id, SettleAction::Release)],
+    );
+
+    assert_eq!(results, soroban_sdk::vec![&env, Ok(())]);
+    assert_eq!(f.token.balance(&f.payee), 300);
+    assert_eq!(f.token.balance(&f.contract_id), 0);
+    assert_eq!(f.client.get_status(&escrow_id), EscrowStatus::Released);
+    assert!(f.client.is_paused());
+}
+
+#[test]
+fn settle_many_refund_still_returns_funds_to_the_payer_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let escrow_id = create(&env, &f, 300, None);
+
+    f.client.pause(&f.custodian);
+    let results = f.client.settle_many(
+        &f.releaser,
+        &soroban_sdk::vec![&env, (escrow_id, SettleAction::Refund)],
+    );
+
+    assert_eq!(results, soroban_sdk::vec![&env, Ok(())]);
+    assert_eq!(f.token.balance(&f.payer), 1_000);
+    assert_eq!(f.token.balance(&f.contract_id), 0);
+    assert_eq!(f.client.get_status(&escrow_id), EscrowStatus::Refunded);
+    assert!(f.client.is_paused());
+}
+
+#[test]
+fn settle_many_mixed_batch_settles_everything_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = deploy(&env);
+    let to_release = create(&env, &f, 300, None);
+    let to_refund = create(&env, &f, 200, None);
+
+    f.client.pause(&f.custodian);
+    let results = f.client.settle_many(
+        &f.releaser,
+        &soroban_sdk::vec![
+            &env,
+            (to_release, SettleAction::Release),
+            (to_refund, SettleAction::Refund),
+        ],
+    );
+
+    assert_eq!(results, soroban_sdk::vec![&env, Ok(()), Ok(())]);
+    // 1000 minted - 300 released - 200 escrowed + 200 refunded = 700.
+    assert_eq!(f.token.balance(&f.payee), 300);
+    assert_eq!(f.token.balance(&f.payer), 700);
+    assert_eq!(f.token.balance(&f.contract_id), 0);
 }
 
 #[test]

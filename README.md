@@ -64,8 +64,8 @@ on-chain lever instead: one `pause_admin` address, fixed at deployment by
 the contract's constructor, can flip a flag that makes every deposit path
 fail with `Paused` (error 36).
 
-Nothing else changes. `release`, `refund`, and the timeout refund never read
-the flag, so **a pause can never lock funds that are already escrowed** —
+Nothing else changes. `release`, `refund`, the timeout refund, and both
+`settle_many` ops (release and refund) never read the flag, so **a pause can never lock funds that are already escrowed** —
 paused means "no new business", never "your money is stuck". The pause has
 no timelock, no second role, and no power over existing escrows; unpausing
 is the same custodian calling `unpause`. See
