@@ -345,18 +345,9 @@ pub enum Error {
     /// contract itself, or an amount that would overflow the fee math —
     /// see docs/adr/0010.
     InvalidFee = 35,
-    /// New deposits are blocked: the contract is paused (docs/adr/0011).
-    /// Only deposit paths return this — every outbound path (`release`,
-    /// `refund`, timeout refund, pooled `claim_refund`) is unaffected by
-    /// the pause. Appended after the pooled-escrow errors so every
-    /// existing discriminant keeps its on-chain value.
-    Paused = 36,
-    /// `pause` called while the contract is already paused — a no-op is
-    /// rejected rather than emitting an event for a transition that
-    /// didn't happen (docs/adr/0011).
-    AlreadyPaused = 37,
-    /// `unpause` called while the contract is not paused (docs/adr/0011).
-    NotPaused = 38,
+    /// An outbound release transfer failed; the funded escrow remains
+    /// retryable and may still use its refund path.
+    Undeliverable = 36,
 }
 
 #[contract]
@@ -1449,7 +1440,7 @@ impl EscrowContract {
         // Effects before interactions: the state write lands before any
         // token call, so a re-entrant token cannot see a still-`Funded`
         // escrow (threat model T4).
-        data.status = settled;
+        data.status = settled.clone();
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), data);
@@ -1461,12 +1452,30 @@ impl EscrowContract {
         Self::sub_liability(env, &data.token, data.amount)?;
 
         let token_client = token::Client::new(env, &data.token);
-        if let Some(recipient) = fee_recipient {
-            if fee > 0 {
-                token_client.transfer(&env.current_contract_address(), &recipient, &fee);
+        if settled == EscrowStatus::Released {
+            if let Some(recipient) = fee_recipient {
+                if fee > 0 {
+                    let transfer = token_client.try_transfer(
+                        &env.current_contract_address(),
+                        &recipient,
+                        &fee,
+                    );
+                    if !matches!(transfer, Ok(Ok(()))) {
+                        return Err(Error::Undeliverable);
+                    }
+                }
             }
+            let transfer = token_client.try_transfer(
+                &env.current_contract_address(),
+                &destination,
+                &payout,
+            );
+            if !matches!(transfer, Ok(Ok(()))) {
+                return Err(Error::Undeliverable);
+            }
+        } else {
+            token_client.transfer(&env.current_contract_address(), &destination, &payout);
         }
-        token_client.transfer(&env.current_contract_address(), &destination, &payout);
         if notify_payee {
             // The callback reports what the payee actually received — gross
             // minus any protocol fee — not the gross escrowed amount.
