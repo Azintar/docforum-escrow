@@ -26,10 +26,11 @@ get_status(escrow_id) -> EscrowStatus  // enum: Funded | Released | Refunded | C
 get_escrow(escrow_id) -> EscrowData    // read-only: payer, payee, token, amount, condition_ref, status, releasers, threshold, refund_after, refund_to, fee_recipient, fee_bps — IMPLEMENTED (Phase E4 + E5; `releaser` became `releasers`+`threshold` in #119)
 release(escrow_id, caller) -> result   // IMPLEMENTED (Phase E2) — a releaser, threshold must be 1, only while Funded
 release_with_approvals(escrow_id, approvers) -> result   // IMPLEMENTED (Phase E5, issue #119, ADR 0007) — >= threshold distinct releasers, each authorizing this invocation
-refund(escrow_id, caller) -> result    // IMPLEMENTED (Phase E2 + E4) — a releaser when threshold is 1; anyone too, once refund_after has passed, and then still only to the stored `refund_to` (= payer unless set at creation, ADR 0009)
+refund(escrow_id, caller) -> result    // releaser (threshold 1), stored payee voluntarily while Funded, or anyone after timeout; always pays stored `refund_to` (ADR 0009/0010)
 refund_with_approvals(escrow_id, approvers) -> result    // IMPLEMENTED (Phase E5, issue #119) — same approval rules as release_with_approvals
 settle_many(caller, ops: Vec<(escrow_id, Release|Refund)>) -> Vec<Result<(), Error>> // IMPLEMENTED (Phase E5, issue #29, ADR 0012) — caller authorizes once; each op gets exactly the checks of release/refund against that escrow's own releasers; best-effort, one result per op in input order (Err = untouched; same escrow twice → second NotFunded); a post-transfer failure (payee callback) reverts the whole batch; at most MAX_SETTLE_OPS = 20 (BatchTooLarge); not deployed on testnet yet
 top_up(escrow_id, payer, amount) -> result // IMPLEMENTED (issue #26) — original payer only, funded state only; emits `top_up`
+transfer_payee(escrow_id, current_payee, new_payee) -> result // IMPLEMENTED (Phase E5, issue #45) — current payee only, funded state only; new_payee may not be the contract address or the payer; rotation tool, not key-loss recovery
 create_pooled_escrow(creator, payee, token, funding_target, condition_ref, releaser, funding_deadline) -> escrow_id // IMPLEMENTED (Phase E5, issue #113, ADR 0011) — pooled escrow; amount starts at 0, `funding_target` > 0 and a strictly-future `funding_deadline` are fixed at creation; not deployed on testnet yet
 contribute(escrow_id, payer, amount) -> () // IMPLEMENTED (issue #113) — permissionless before the deadline, up to the target only; balance-delta verified (`transfer_in_exact`) and recorded per payer, accumulating across repeats
 claim_refund(escrow_id, contributor) -> () // IMPLEMENTED (issue #113) — pull-based refund, contributor's own auth, only from a failed round (deadline passed, target unmet), pays exactly the recorded amount once (`AlreadyRefunded` after)
@@ -189,6 +190,7 @@ await client.isPaused();                     // boolean — are new deposits blo
 await client.getPauseAdmin();                // custodian address set at deploy (docs/adr/0011)
 await client.pause(caller);                  // { txHash } — caller: Keypair/Signer, must be the pause custodian
 await client.unpause(caller);                // { txHash } — same authority; re-opens new deposits
+await client.refund({ escrowId, caller });   // { txHash } — releaser (threshold 1), the stored payee voluntarily, or anyone after refundAfter
 await client.refundWithApprovals({ escrowId, approvers });  // { txHash } — M-of-N refund
 await client.getTokenInfo(token);           // { decimals, symbol, name } — cached token metadata read from the SEP-41 contract
 await client.getEvents({ fromLedger });      // { events, nextCursor } — decoded lifecycle event page
