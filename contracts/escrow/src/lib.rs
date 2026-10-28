@@ -53,8 +53,6 @@
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
     symbol_short, token, Address, Env, IntoVal, String, Vec,
-    symbol_short, token,
-    Address, Env, IntoVal, String, Vec,
 };
 
 // Bump this value whenever a contract interface or behavior change is made.
@@ -369,6 +367,17 @@ pub enum Error {
     /// An outbound release transfer failed; the funded escrow remains
     /// retryable and may still use its refund path.
     Undeliverable = 36,
+    /// A deposit path was called while the emergency pause is on — see
+    /// docs/adr/0011. `main` already spent 35 (`InvalidFee`) and 36
+    /// (`Undeliverable`), so this uses a provisional code (issue #35 × 100);
+    /// the maintainer fold renumbers it — see contract-changes.d/README.md.
+    Paused = 3500,
+    /// `pause` on an already-paused contract. The transition did not
+    /// happen, so no event is emitted.
+    AlreadyPaused = 3501,
+    /// `unpause` on a running contract. The transition did not happen, so
+    /// no event is emitted.
+    NotPaused = 3502,
 }
 
 #[contract]

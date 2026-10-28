@@ -126,7 +126,7 @@ value. **Reviewers should challenge these ratings.**
   and releases after it — asserted in `contracts/escrow/tests/pause.rs`.
 - **Actual loss from a compromised key:** none directly. The damage is
   **liveness/griefing**: no new deposits until the custodian unpauses, so
-  integrators see `Paused` (error 36) and must either wait, use a fresh
+  integrators see `Error::Paused` and must either wait, use a fresh
   deployment, or route around this contract id.
 - **Loss from a *lost* key:** the contract can never be unpaused, so this
   contract id stops taking new business permanently. Existing escrows are

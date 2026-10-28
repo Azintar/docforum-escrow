@@ -125,8 +125,8 @@ Option 1.
    an event never claims a transition that didn't happen.
 3. **Scope: new deposits only.** Every creation entry point funnels through
    `create_escrow_inner`, which checks the flag first and returns the new
-   `Error::Paused` (36) without pulling funds, without consuming an escrow
-   id, and without writing an escrow. `top_up` — a deposit path added after
+   `Error::Paused` (provisional code 3500) without pulling funds, without
+   consuming an escrow id, and without writing an escrow. `top_up` — a deposit path added after
    this ADR was first written — applies the same check before its transfer,
    exactly as the ADR originally required of any future deposit path.
    Pooled escrows (docs/adr/0011-pooled-escrow-funding.md) are gated the
@@ -178,12 +178,15 @@ the deadline.
   keys (`PauseAdmin`, `Paused`) are added. Existing escrow entries are
   unaffected — and there is no migration to worry about, because a
   redeploy is a new contract id by definition.
-- **New error codes**: `Paused = 36`, `AlreadyPaused = 37`, `NotPaused = 38`.
-  Every existing code keeps its number, because consumers map codes, not
-  names. They were originally reserved as 26–28, but batch settlement
-  (`BatchTooLarge = 25`) and pooled escrows (`NotPooled` through
-  `InvalidFundingDeadline`, 26–34) landed on `main` first, so the pause
-  codes were appended after them.
+- **New error codes**: `Paused`, `AlreadyPaused`, `NotPaused`, added with
+  the provisional codes 3500–3502 (issue #35 × 100 + n) described in
+  `contract-changes.d/README.md`; the maintainer fold assigns the final
+  numbers. Every existing code keeps its number, because consumers map
+  codes, not names. They were originally reserved as 26–28, but batch
+  settlement (`BatchTooLarge = 25`), pooled escrows (`NotPooled` through
+  `InvalidFundingDeadline`, 26–34) and the protocol fee / outbound-transfer
+  codes (`InvalidFee = 35`, `Undeliverable = 36`) landed on `main` first, so
+  the pause codes go in after them.
 - **New public functions**: `pause`, `unpause`, `is_paused`,
   `get_pause_admin`, plus the constructor. Additive but a real surface
   change: SDK bindings must be regenerated and the SDK minor-bumped by

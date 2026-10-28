@@ -265,8 +265,9 @@ An opt-in creation method can require the payee to authorize `accept` before rel
   pause can never lock existing funds (invariant I8, threat model T12).
   Alternatives rejected in the ADR: permissionless pause (trivial
   griefing), auto-expiring pause (silently lapses mid-incident), token
-  allowlist (a different problem), and doing nothing. New append-only error
-  codes `Paused = 36`, `AlreadyPaused = 37`, `NotPaused = 38`;
+  allowlist (a different problem), and doing nothing. New error codes
+  `Paused`, `AlreadyPaused` and `NotPaused`, added with the provisional
+  codes 3500–3502 (`contract-changes.d/35-emergency-pause.md`);
   `Paused`/`Unpaused` events carry the custodian. 20 tests in
   `contracts/escrow/tests/pause.rs`, including release, releaser refund,
   stranger timeout refund, and release-after-deadline while paused, plus a
